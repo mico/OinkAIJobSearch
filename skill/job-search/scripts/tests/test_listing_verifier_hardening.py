@@ -29,8 +29,33 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+
+_RELOADED_MODULES = ("forensic", "telegram_client")
+
+
+@pytest.fixture(autouse=True)
+def _restore_reloaded_modules_and_env():
+    """Undo `_reload_telegram_client` after each test.
+
+    Tests here re-import telegram_client and then overwrite its functions
+    in place (e.g. `tc._url_is_alive = lambda ...`). Without restoring,
+    that stubbed module stays in sys.modules and every later test file
+    that imports telegram_client gets the stubs plus the leaked env vars.
+    """
+    saved_env = dict(os.environ)
+    saved_modules = {name: sys.modules.get(name) for name in _RELOADED_MODULES}
+    yield
+    os.environ.clear()
+    os.environ.update(saved_env)
+    for name, module in saved_modules.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
 # ---------------------------------------------------------------------------
