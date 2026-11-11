@@ -66,7 +66,7 @@
 |---------|-------------|
 | **Software engineer** (frontend, backend, full-stack, DevOps/SRE) | LinkedIn, HN "Who is Hiring", Welcome to the Jungle, Built In, Wellfound (startups/YC), EU tech boards (JustJoin.it, NoFluffJobs, Tecnoempleo, InfoJobs) |
 | **ML / AI engineer, data scientist** | aijobs.net (curated AI/ML/MLOps board) on top of all general tech sources |
-| **Crypto / web3** (protocol, smart-contract, DeFi, and non-tech roles at crypto companies) | web3.career, CryptoJobsList, Cryptocurrency Jobs, and crypto VC/ecosystem portfolio boards (Solana, Avalanche, Dragonfly, Multicoin, Electric Capital, CoinFund, Variant, Placeholder, Framework) on top of all general tech sources |
+| **Crypto / web3** (protocol, smart-contract, DeFi, and non-tech roles at crypto companies) | web3.career, CryptoJobsList, Cryptocurrency Jobs, Degen Crypto Jobs, and crypto VC/ecosystem portfolio boards (Solana, Avalanche, Dragonfly, Multicoin, Electric Capital, CoinFund, Variant, Placeholder, Framework) on top of all general tech sources |
 | **Researcher / academic** (PhD, postdoc, faculty) | EURAXESS, jobs.ac.uk, AcademicPositions, Ikerbasque, university doctoral boards |
 | **Humanitarian / international development** | ReliefWeb, ImpactPool, DevEx, UN/INGO portals |
 | **Remote-first, any of the above** | Dedicated remote boards plus EU-wide vacancies via EURES |

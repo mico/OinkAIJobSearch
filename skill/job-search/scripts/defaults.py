@@ -64,13 +64,14 @@ DEFAULTS: dict = {
         "cryptojobslist":     True,  # cryptojobslist.com public RSS
         "cryptocurrencyjobs": True,  # cryptocurrencyjobs.co public RSS
         "crypto_vc_boards":   True,  # Getro portfolio boards (Solana, Dragonfly, Multicoin, …)
+        "degencryptojobs":    True,  # degencryptojobs.com /api/jobs JSON (ATS-linked)
     },
 
     # How many hours back to look. HN threads are softened ×30 internally.
     "max_age_hours":  48,
     "max_per_source": 36,
-    # Headroom: 28 SOURCES × 36 + 9 crypto VC boards × 12 + 90 linkedin
-    # + 36 web_search ≈ 1242 ceiling. 1400 leaves room for a few more sources.
+    # Headroom: 29 SOURCES × 36 + 9 crypto VC boards × 12 + 90 linkedin
+    # + 36 web_search ≈ 1278 ceiling. 1400 leaves room for a few more sources.
     "max_total":      1400,
     # Crypto source knobs (see sources/web3_career.py, crypto_vc_boards.py).
     "web3_career_pages":          3,

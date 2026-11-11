@@ -586,6 +586,7 @@ _SOURCES_CATALOG: list[tuple[str, str]] = [
     ("cryptojobslist",     "CryptoJobsList"),
     ("cryptocurrencyjobs", "Cryptocurrency Jobs"),
     ("crypto_vc_boards",   "Crypto VC & ecosystem boards"),
+    ("degencryptojobs",    "Degen Crypto Jobs"),
     # Spain / EU local + commercial
     ("infojobs",        "InfoJobs (Spain)"),
     ("tecnoempleo",     "Tecnoempleo (Spain tech)"),
