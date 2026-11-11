@@ -58,14 +58,23 @@ DEFAULTS: dict = {
         # Social sources (added 2026-11). Global, AI scorer is the only gate.
         "reddit":            True,   # Public JSON or REDDIT_CLIENT_ID/SECRET OAuth.
         "x_twitter":         True,   # X_BEARER_TOKEN or APIFY_TOKEN + X_APIFY_ACTOR.
+        # Crypto / web3 boards (added 2026-11-11). Plain HTTP, no auth, run
+        # in-process on every backend (no Apify actor) — see _LOCAL_ONLY_SOURCES.
+        "web3_career":        True,  # web3.career listing HTML (~45 newest)
+        "cryptojobslist":     True,  # cryptojobslist.com public RSS
+        "cryptocurrencyjobs": True,  # cryptocurrencyjobs.co public RSS
+        "crypto_vc_boards":   True,  # Getro portfolio boards (Solana, Dragonfly, Multicoin, …)
     },
 
     # How many hours back to look. HN threads are softened ×30 internally.
     "max_age_hours":  48,
     "max_per_source": 36,
-    # Headroom: 25 SOURCES × 36 + 90 linkedin + 36 web_search ≈ 1026 ceiling.
-    # 1200 leaves room for adding 1-2 more sources before this needs another bump.
-    "max_total":      1200,
+    # Headroom: 28 SOURCES × 36 + 9 crypto VC boards × 12 + 90 linkedin
+    # + 36 web_search ≈ 1242 ceiling. 1400 leaves room for a few more sources.
+    "max_total":      1400,
+    # Crypto source knobs (see sources/web3_career.py, crypto_vc_boards.py).
+    "web3_career_pages":          3,
+    "crypto_vc_boards_per_board": 12,
     # Generic FALLBACK social listings/queries, X web-search syntax. Real runs
     # use each profile's search_seeds.social (profile_builder rule 24c) via
     # social_seeds.resolve; these apply only when no profile carries one.
