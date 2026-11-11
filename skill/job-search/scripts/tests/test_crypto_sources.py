@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import forensic
-from sources import web3_career, cryptojobslist, cryptocurrencyjobs, crypto_vc_boards
+from sources import web3_career, cryptojobslist, cryptocurrencyjobs, crypto_vc_boards, degencryptojobs
 
 
 
@@ -197,6 +197,46 @@ def test_getro_per_board_cap(monkeypatch):
     assert len(jobs) == 5
 
 
+# ---------- Degen Crypto Jobs ----------
+
+def _degen_job(link, title="Smart Contract Engineer", date="2026-11-10T07:00:00Z", **kw):
+    return {"title": title, "company": "Acme DAO", "location": ["Remote", "Portugal"],
+            "salary": "$120K-$160K", "description": "<p>Build DeFi things.</p>",
+            "tags": ["Engineering"], "topTags": ["Solidity", "DeFi"], "featured": False,
+            "datePosted": date, "link": link, "source": "greenhouse", **kw}
+
+
+def test_degencryptojobs_parses_sorts_and_dedupes():
+    payload = {"jobs": [
+        _degen_job("https://jobs.lever.co/x/old", title="Pinned Old", date="2026-08-20T10:00:00Z"),
+        _degen_job("https://boards.greenhouse.io/x/1"),
+        _degen_job("https://boards.greenhouse.io/x/1"),
+        _degen_job("", title="No link"),
+    ], "total": 4, "page": 1, "totalPages": 1}
+    jobs = degencryptojobs.parse_jobs(payload)
+    assert [j.url for j in jobs] == ["https://boards.greenhouse.io/x/1", "https://jobs.lever.co/x/old"]
+    j = jobs[0]
+    assert j.source == "degencryptojobs" and j.company == "Acme DAO"
+    assert j.location == "Remote, Portugal" and j.salary == "$120K-$160K"
+    assert "Solidity" in j.snippet and "Build DeFi things." in j.snippet and "<p>" not in j.snippet
+
+
+def test_degencryptojobs_caps_and_survives_bad_payload(monkeypatch):
+    class R(FakeResp):
+        def __init__(self, data=None, bad=False):
+            super().__init__(); self._d, self._bad = data, bad
+        def json(self):
+            if self._bad:
+                raise ValueError("not json")
+            return self._d
+    payload = {"jobs": [_degen_job(f"https://x.test/{i}") for i in range(50)]}
+    monkeypatch.setattr(degencryptojobs.requests, "get", lambda url, **kw: R(payload))
+    assert len(degencryptojobs.fetch({"max_per_source": 10})) == 10
+    monkeypatch.setattr(degencryptojobs.requests, "get", lambda url, **kw: R(bad=True))
+    assert degencryptojobs.fetch({}) == []
+    assert degencryptojobs.parse_jobs({"jobs": "nope"}) == []
+
+
 # ---------- wiring ----------
 
 def test_crypto_sources_are_registered_enabled_and_local():
@@ -204,7 +244,8 @@ def test_crypto_sources_are_registered_enabled_and_local():
     import bot
     from defaults import DEFAULTS
     catalog = {k for k, _ in bot._SOURCES_CATALOG}
-    for key in ("web3_career", "cryptojobslist", "cryptocurrencyjobs", "crypto_vc_boards"):
+    for key in ("web3_career", "cryptojobslist", "cryptocurrencyjobs", "crypto_vc_boards",
+                "degencryptojobs"):
         assert key in search_jobs.SOURCES
         assert key in search_jobs._LOCAL_ONLY_SOURCES  # no Apify actor → runs on every backend
         assert DEFAULTS["sources"][key] is True

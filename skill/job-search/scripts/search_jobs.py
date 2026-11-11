@@ -61,6 +61,7 @@ from sources import (                                      # noqa: E402
     reddit, x_twitter,
     # Crypto / web3 boards (added 2026-11-11).
     web3_career, cryptojobslist, cryptocurrencyjobs, crypto_vc_boards,
+    degencryptojobs,
 )
 from telemetry import MonitorStore                         # noqa: E402
 from instrumentation import pipeline_run, source_run, error_capture  # noqa: E402
@@ -131,6 +132,7 @@ SOURCES = {
     "cryptojobslist":     cryptojobslist,     # cryptojobslist.com RSS
     "cryptocurrencyjobs": cryptocurrencyjobs, # cryptocurrencyjobs.co RSS
     "crypto_vc_boards":   crypto_vc_boards,   # Getro crypto VC/ecosystem boards
+    "degencryptojobs":    degencryptojobs,    # degencryptojobs.com public JSON
     # `linkedin` and `web_search` are PER-USER only (run inside the recipient
     # loop with profile.search_seeds), so they're deliberately absent here.
 }
@@ -573,6 +575,7 @@ _LOCAL_ONLY_SOURCES: tuple[str, ...] = (
     "reddit", "x_twitter",
     # Crypto boards: cheap public RSS/HTML, no actor published (2026-11-11).
     "web3_career", "cryptojobslist", "cryptocurrencyjobs", "crypto_vc_boards",
+    "degencryptojobs",
 )
 
 
