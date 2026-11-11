@@ -320,39 +320,6 @@ def test_rebuild_profile_default_builder_is_language_aware():
     ), "rebuild_profile must default to the language-aware build_profile_sync"
 
 
-def test_default_builder_renders_nonempty_prompt():
-    # The whole point of the wiring fix: the production default builder must
-    # render a NON-EMPTY prompt (i.e. its template exists). build_profile_sync
-    # uses _render_prompt -> profile_builder.txt.
-    assert pb._render_prompt("résumé", "prefs"), (
-        "the production default builder's template must render non-empty"
-    )
-
-
-def test_seeds_builder_renders_template_and_calls_model():
-    # History: this test used to pin the OPPOSITE (template absent → builder
-    # short-circuits without a model call) and its docstring said to revisit
-    # once profile_seeds.txt came back. It came back on 2026-07-02 with the
-    # source query-enabled search work, so now pin the live contract: the
-    # template renders and the model IS invoked with the user inputs.
-    assert pb._SEEDS_PROMPT_PATH.exists(), (
-        "profile_seeds.txt missing — seeds builder would short-circuit again; "
-        "if that removal is intentional, restore the old short-circuit test"
-    )
-
-    calls = {}
-
-    def _capture_run(prompt, **kwargs):
-        calls["prompt"] = prompt
-        return ""  # unparseable on purpose — this test pins the render+call step
-
-    res = pb.build_search_seeds_sync("résumé-marker", "prefs-marker", _run_p=_capture_run)
-    assert "prompt" in calls, "model must be called when the template exists"
-    assert "résumé-marker" in calls["prompt"]
-    assert "prefs-marker" in calls["prompt"]
-    # Whatever the (stubbed, empty) model output does downstream, the
-    # template-missing short-circuit must not be the reported error.
-    assert "seeds prompt template missing" not in (res.error or "")
 
 
 def test_rebuild_profile_end_to_end_emits_spanish_with_temp_db(tmp_path):

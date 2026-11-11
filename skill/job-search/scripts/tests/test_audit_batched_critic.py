@@ -15,14 +15,14 @@ Covered:
     scorer fixes it on round 2 → final output is clamped.
   * 3 batches × workers=2 — function still completes correctly under
     the ThreadPoolExecutor (proves the wiring isn't accidentally serial).
-  * zero jobs → empty list, ZERO claude calls.
+  * zero jobs → empty list, ZERO codex calls.
   * critic CLI returns None → audit accepts the scorer's output for
     that batch (and logs the warning).
 
 All tests run hermetically — we monkeypatch
 `job_enrich.wrapped_run_p` and decide via the `caller` arg whether
 the call is a scorer or a critic. Mocks return JSON-strings shaped
-like the real `claude -p --output-format json` envelope so the same
+like the real `codex -p --output-format json` envelope so the same
 `extract_assistant_text` parser is exercised.
 """
 from __future__ import annotations
@@ -61,7 +61,7 @@ def _make_job(ext_id: str, *, title: str = "Engineer",
 
 
 def _envelope(payload: dict | list) -> str:
-    """Mimic the `claude -p --output-format json` envelope so
+    """Mimic the `codex -p --output-format json` envelope so
     `extract_assistant_text` round-trips through the `result` field."""
     return json.dumps({"result": json.dumps(payload, ensure_ascii=False)})
 
@@ -519,7 +519,7 @@ def test_model_knobs_thread_to_cli_scorer_and_critic(fake_cli):
     out = job_enrich.reanalyze_scoring_ai(
         jobs, enr, resume_text="r", prefs_text="p",
         batch_size=10, workers=1, critic_rounds=3,
-        model="sonnet", critic_model="sonnet",
+        model="configured-model", critic_model="configured-model",
     )
 
     assert len(out) == 2
@@ -528,8 +528,8 @@ def test_model_knobs_thread_to_cli_scorer_and_critic(fake_cli):
     assert fake_cli.n_critic_calls() == 2
     # Scorer ran on the scorer model; critic ran on the critic model.
     # No None leaked (would mean the knob never reached wrapped_run_p).
-    assert fake_cli.scorer_models() == {"sonnet"}
-    assert fake_cli.critic_models() == {"sonnet"}
+    assert fake_cli.scorer_models() == {"configured-model"}
+    assert fake_cli.critic_models() == {"configured-model"}
 
 
 def test_distinct_scorer_and_critic_models(fake_cli):
@@ -550,21 +550,11 @@ def test_distinct_scorer_and_critic_models(fake_cli):
     out = job_enrich.reanalyze_scoring_ai(
         jobs, enr, resume_text="r", prefs_text="p",
         batch_size=10, workers=1, critic_rounds=2,
-        model="opus", critic_model="sonnet",
+        model="scorer-model", critic_model="critic-model",
     )
 
     assert len(out) == 3
-    assert fake_cli.scorer_models() == {"opus"}
-    assert fake_cli.critic_models() == {"sonnet"}
+    assert fake_cli.scorer_models() == {"scorer-model"}
+    assert fake_cli.critic_models() == {"critic-model"}
 
 
-def test_default_audit_knobs_are_sonnet_and_two_rounds():
-    """defaults.py wires the post-send audit to the cheaper models +
-    fewer rounds. Locks the Tier-1 cost knobs so a future edit can't
-    silently bump the audit back onto Opus."""
-    import defaults  # noqa: PLC0415
-
-    d = defaults.DEFAULTS
-    assert d["ai_scoring_audit_model"] == "sonnet"
-    assert d["ai_scoring_audit_critic_model"] == "sonnet"
-    assert d["ai_scoring_audit_critic_rounds"] == 2

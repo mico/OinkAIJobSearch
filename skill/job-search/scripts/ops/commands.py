@@ -174,7 +174,7 @@ def cmd_health(tg: TelegramClient, store: Any, chat_id: int, args: list[str]) ->
 # ---------- /stats ----------
 
 def cmd_stats(tg: TelegramClient, store: Any, chat_id: int, args: list[str]) -> None:
-    """`/stats [24h|7d]` — pipeline / user / Claude-cost rollup.
+    """`/stats [24h|7d]` — pipeline / user / AI usage rollup.
 
     Default: two columns (24h | 7d). With explicit `24h` arg: collapse to one.
     """
@@ -241,7 +241,7 @@ def cmd_stats(tg: TelegramClient, store: Any, chat_id: int, args: list[str]) -> 
         col = "  | ".join(_pad(c, 4) for c in cells)
         lines.append("  " + _pad(kind, 18) + " " + col + breakdown_extra)
 
-    # Users — derived from claude window summary if it carries it; otherwise omit.
+    # Users — derived from the usage window summary if present; otherwise omit.
     lines.append("")
     lines.append("Users")
     has_user = any("active_users" in s or "digests_sent" in s for s in summaries)
@@ -253,9 +253,9 @@ def cmd_stats(tg: TelegramClient, store: Any, chat_id: int, args: list[str]) -> 
     else:
         lines.append("  (no user-level rollup available)")
 
-    # Claude CLI block.
+    # Codex CLI block.
     lines.append("")
-    lines.append("Claude CLI")
+    lines.append("Codex CLI")
     call_cells = "  | ".join(_pad(str(s.get("count", 0)), 4) for s in summaries)
     lines.append("  " + _pad("calls", 18) + " " + call_cells)
 
@@ -282,8 +282,9 @@ def cmd_stats(tg: TelegramClient, store: Any, chat_id: int, args: list[str]) -> 
         _pad(_fmt_dollars(s.get("cost_us", 0)), 6) for s in summaries
     )
     lines.append(
-        "  " + _pad("cost (USD)", 18) + " " + cost_cells + "    actual when available, else surrogate"
+        "  " + _pad("recorded cost (USD)", 18) + " " + cost_cells
     )
+    lines.append("  Codex subscription billing unavailable; zero is not free usage.")
 
     # Errors (delivered) — count from recent_errors per window. delivered_at != NULL
     # means the alert went out; NULL means rate-limit suppression.

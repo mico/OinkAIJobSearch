@@ -1,7 +1,7 @@
 """Operational defaults for the job-search pipeline.
 
 Replaces the deleted `config/filters.yaml`. All matching is now per-user via
-the Opus-built profile (`user_profile.py`); the only dict-shaped state the
+the Codex-built profile (`user_profile.py`); the only dict-shaped state the
 pipeline still needs is OPERATIONAL — which sources to run, timeouts, caps,
 score floor, message rendering. Those live here as code defaults so a fresh
 clone is runnable with no config file.
@@ -26,7 +26,7 @@ DEFAULTS: dict = {
         "remotive":         True,
         "weworkremotely":   True,
         "linkedin":         True,    # per-user via profile.search_seeds.linkedin
-        "remocate":         True,    # curated boards — Claude CLI required
+        "remocate":         True,    # curated boards — Codex CLI required
         "wantapply":        True,
         "remoterocketship": True,
         "web_search":       True,    # Re-enabled 2026-05-24 after T4 verifier hardening (soft-404 pre-LLM check + fail-safe gate) ran clean for 36h. Was #1 strong-hit source (17-32% hit rate).
@@ -52,102 +52,44 @@ DEFAULTS: dict = {
         "wttj":              True,   # Welcome to the Jungle — Algolia
         "builtin":           True,   # US-heavy tech HTML scrape
         "impactpool":        True,   # UN/NGO HTML — researcher-friendly
-        "devex":             True,   # International dev — Claude CLI (site-block workaround)
+        "devex":             True,   # International dev — Codex CLI (site-block workaround)
         "justjoinit":        True,   # Polish/CEE tech JSON API — frontend-heavy
         "nofluffjobs":       True,   # Polish/CEE tech JSON API — salary-mandatory
+        # Social sources (added 2026-11). Global, AI scorer is the only gate.
+        "reddit":            True,   # Public JSON or REDDIT_CLIENT_ID/SECRET OAuth.
+        "x_twitter":         True,   # X_BEARER_TOKEN or APIFY_TOKEN + X_APIFY_ACTOR.
     },
 
     # How many hours back to look. HN threads are softened ×30 internally.
     "max_age_hours":  48,
     "max_per_source": 36,
-    # Headroom: 23 SOURCES × 36 + 90 linkedin + 36 web_search ≈ 954 ceiling.
+    # Headroom: 25 SOURCES × 36 + 90 linkedin + 36 web_search ≈ 1026 ceiling.
     # 1200 leaves room for adding 1-2 more sources before this needs another bump.
     "max_total":      1200,
+    # Generic FALLBACK social listings/queries, X web-search syntax. Real runs
+    # use each profile's search_seeds.social (profile_builder rule 24c) via
+    # social_seeds.resolve; these apply only when no profile carries one.
+    "reddit_subreddits": [
+        "forhire", "hiring", "jobbit", "remotejs", "PythonJobs",
+        "MachineLearningJobs", "DevOpsJobs", "golangjobs", "rustjobs",
+    ],
+    "reddit_max_pages": 3,
+    "x_search_queries": [
+        '("we\'re hiring" OR "we are hiring" OR "now hiring" OR "join our team") (engineer OR developer OR designer OR scientist OR researcher) -filter:retweets -filter:replies',
+        '(hiring OR "open role" OR "job opening") (remote OR hybrid) (apply OR "DM me") -giveaway -filter:retweets -filter:replies',
+    ],
 
-    # AI enrichment — single Haiku call per user per run scores every fetched
+    # AI enrichment — single Codex call per user per run scores every fetched
     # posting against resume + preferences. The sole matching gate.
     "ai_enrich":            True,
-    # v2.1: bumped 240→1200 because Sonnet at batch=10 with full resume +
-    # prefs + 10 jobs (~37k chars prompt) routinely hit the old 240s
-    # ceiling, forcing split-retries. 1200 (~20 min) gives Sonnet breathing
-    # room without inviting indefinite hangs.
-    #
-    # IMPORTANT (2026-05-28): `ai_enrich_timeout_s` now governs the HAIKU
-    # triage pass only (in two-pass mode) and the SINGLE-PASS Sonnet
-    # fallback. The PRIMARY Sonnet rescore in two-pass mode uses the
-    # tighter `ai_sonnet_timeout_s` knob below. 1200s here is kept as
-    # generous belt-and-braces for the slow paths — those don't risk a
-    # 4-worker pool stalling a whole iter the way a batched Sonnet
-    # rescore did.
+    # Primary/single-pass timeout. The optional rescore has its own cap.
     "ai_enrich_timeout_s":  1200,
-    # Sonnet RESCORE-pass timeout (two-pass mode only). 300s is sized
-    # against measured Sonnet-batch latency over the trailing 7d (n=94,
-    # `caller='job_enrich:sonnet'` in `claude_calls`):
-    #
-    #   p50: 117.1s   p90: 351.6s   p95: 407.9s   p99: 507.3s   max: 530.9s
-    #
-    # 14/94 (≈15%) of Sonnet batches at the OLD batch=10 exceeded 300s.
-    # After the 2026-05-28 batch-size cap (batch=10 → batch=5) the input
-    # payload drops from ~25k → ~19k tokens; expected new ceiling is
-    # roughly 530 × 5/10 ≈ 265s (under the 300s cut). So 300s should
-    # almost never fire on healthy Sonnet calls — it's a cap on the
-    # PATHOLOGICAL slow-success cases that were monopolising a worker
-    # for 5-9 minutes and silently consuming the iter's wall-time
-    # budget without triggering the existing split-retry (split-retry
-    # fires on parse/empty failures, not on slow successes).
-    #
-    # Recovery on timeout: the batch is retried ONCE at `batch_size=1`.
-    # Single-job batches drop the prompt payload to ~13k tokens; if
-    # THAT also times out we log + drop the job (do not fall back to
-    # the Haiku verdict — that would mix verdict provenance in
-    # `job_scores`). One retry only; no recursive escalation.
-    # Bumped 300→480 (2026-06-24): still seeing ~6 hard timeouts/3d at 300s
-    # (Opus/Sonnet latency has crept up across the board — same trend that
-    # forced the profile-build cap up). 480s absorbs the slow tail; a slow
-    # success on its own worker is cheaper than dropping the verdict.
-    "ai_sonnet_timeout_s":  480,
+    # Rescore timeouts retry once with single-job batches; failed jobs are
+    # dropped rather than silently using an unverified primary verdict.
+    "ai_rescore_timeout_s":  480,
 
-    # Two-pass scoring. Default ON as of 2026-05-19 — single-pass Sonnet
-    # was 63% of monthly AI spend. Two-pass: Haiku triages every posting
-    # cheap, Sonnet re-scores only postings in the
-    # [triage_floor, triage_ceiling) window. Cost cut ~5-8× vs single-
-    # pass Sonnet; Sonnet still arbitrates the borderline 3-vs-4 boundary
-    # where Haiku alone was noisy.
-    #   ai_two_pass:        master toggle. False → single-pass Sonnet.
-    #                       True  → Haiku triage + Sonnet rescore.
-    #   ai_triage_floor:    Triage score threshold for promotion to rescore.
-    #                       Lowered 2→1 on 2026-07-05. A/B on chat 1926270
-    #                       (591 postings, gt=large-rescore>=4): haiku's
-    #                       score-1 band is populated (~16%), so floor=1
-    #                       lifts send-recall .88→.95 (drops ~5% of real sends
-    #                       vs ~12%) for +12pp rescore forwards. Raise to 2/3
-    #                       for a tighter funnel if rescore cost climbs.
-    #   ai_triage_ceiling:  Haiku score AT OR ABOVE which the Sonnet rescore
-    #                       is SKIPPED — Haiku's verdict is trusted as-is.
-    #                       Default 5: Haiku's 5/5 verdicts pass through
-    #                       untouched. Rationale: this is an explicit BET
-    #                       that the Haiku-5-specific downgrade rate is low
-    #                       enough to be worth the per-batch Sonnet latency
-    #                       saved per skip (53s/job on the worst 7d
-    #                       batches). The only measurement we currently
-    #                       have is the 7d aggregate Sonnet downgrade rate
-    #                       across the full Haiku>=2 pool (~55%); the
-    #                       Haiku=5-specific sub-rate is UNMEASURED
-    #                       (`job_scores` stamps only the final model and
-    #                       the merge-counter log lines aggregate across
-    #                       the whole rescore pool). The audit trail for
-    #                       this bet is the `enrich_jobs_ai.trusted_top`
-    #                       forensic stream — one line per skipped
-    #                       Haiku-top — which lets the operator
-    #                       retrospectively measure the false-positive
-    #                       rate of trusted 5s. Set to 6 to disable the
-    #                       skip entirely (send EVERYTHING, including 5s,
-    #                       through Sonnet), or 4 for an even tighter
-    #                       Sonnet funnel that trusts 4s and 5s. This is
-    #                       NOT a heuristic score cap: the prompt's full
-    #                       scoring doctrine still applies to every Sonnet
-    #                       call; this knob only controls WHICH Haiku
-    #                       verdicts are routed to Sonnet at all.
+    # Both passes use Codex. Promote primary scores in [floor, ceiling)
+    # for a second judgment; ceiling=6 includes perfect scores.
     "ai_two_pass":        True,
     "ai_triage_floor":    1,
     # Was 5 (trust triage's own 5/5, skip rescore). Raised to 6 (disable the
@@ -157,17 +99,17 @@ DEFAULTS: dict = {
     # the full scoring doctrine still runs on every rescore call.
     "ai_triage_ceiling":  6,
 
-    # Per-batch chunk size. Separate knobs per pass because Haiku and
-    # Sonnet have very different latency profiles on this prompt template
+    # Per-batch chunk size. Separate knobs per pass because Codex and
+    # Codex have very different latency profiles on this prompt template
     # (~9.1k fixed-overhead tokens of doctrine + per-job briefs).
-    #   ai_max_jobs_per_call:       used for the primary pass (Haiku in
-    #                               two-pass mode, Sonnet in single-pass
-    #                               mode). Haiku at 10/batch is fast and
+    #   ai_max_jobs_per_call:       used for the primary pass (Codex in
+    #                               two-pass mode, Codex in single-pass
+    #                               mode). Codex at 10/batch is fast and
     #                               cheap; we keep the historical value.
-    #   ai_sonnet_max_jobs_per_call: used for the Sonnet RESCORE pass
+    #   ai_rescore_max_jobs_per_call: used for the Codex RESCORE pass
     #                                only (two-pass mode). Lowered 10 → 5
     #                                in 2026-05-28 after forensic showed
-    #                                Sonnet batches of 10 routinely
+    #                                Codex batches of 10 routinely
     #                                stalling 5-9 min (worst 7d:
     #                                347-530s, 53s/job). At batch=5 the
     #                                doctrine+briefs payload drops from
@@ -179,10 +121,10 @@ DEFAULTS: dict = {
     #                                ai_max_jobs_per_call to disable the
     #                                per-pass split.
     "ai_max_jobs_per_call":         10,
-    "ai_sonnet_max_jobs_per_call":  5,
-    # Parallel batch dispatch (v2.1). Each batch is one `claude -p` sub-
-    # process; firing N at once roughly divides wall time by N. Anthropic
-    # API + claude CLI handle their own rate limits; the OS subprocess
+    "ai_rescore_max_jobs_per_call":  5,
+    # Parallel batch dispatch (v2.1). Each batch is one `codex exec` sub-
+    # process; firing N at once roughly divides wall time by N. OpenAI
+    # API + Codex CLI handle their own rate limits; the OS subprocess
     # pool is the practical bound. 4 workers cuts a 60-min serial run to
     # ~15-20 min while staying well under the per-key rate ceiling.
     "ai_enrich_workers": 4,
@@ -220,19 +162,9 @@ DEFAULTS: dict = {
     # the score-≥1 verdicts with a second-opinion model. Catches
     # scoring drift without blocking the user-facing send. Output lands
     # in forensic as `scoring_audit.review` lines — operators can grep
-    # disagreements for patterns. ai_scoring_audit_model can be
-    # overridden to sonnet/haiku for cost trade-offs.
-    #
-    # Model = SONNET (downgraded from opus 2026-05-29). This pass run
-    # AFTER user already got their cards — it not user-facing, it just
-    # post-send QA so ops can grep scoring drift in logs. So a strong
-    # cheaper judge fine here. Opus on this audit was ~34% of spend (Opus
-    # on BOTH scorer + critic, looping up to 3 rounds). Sonnet still a
-    # strong judge for the score-delta + grounding checks; user digest
-    # path untouched. This trade-off is cost/quota, NOT quality of the
-    # match the user sees.
+    # disagreements for patterns. Model overrides must be Codex model IDs.
     "ai_scoring_audit":          True,
-    "ai_scoring_audit_model":    "sonnet",
+    "ai_scoring_audit_model":    None,  # OINK_CODEX_MODEL / Codex default
     "ai_scoring_audit_timeout_s": 480,
     # v2.6 batched-audit-with-critic. Split the audit pool into
     # small batches dispatched in parallel; each batch is paired with
@@ -253,22 +185,16 @@ DEFAULTS: dict = {
     #                  Round 1 + one critic fix-up still catches the
     #                  format/consistency drift; stalemate just keeps
     #                  the last scorer output like before.
-    #   critic_model:  SONNET (downgraded from opus 2026-05-29). The
-    #                  critic only checks FORMAT + score-delta
-    #                  consistency, not match quality, and run after the
-    #                  user already got their cards — Sonnet plenty
-    #                  strong for that, and matching the cheaper scorer
-    #                  class keeps the whole post-send audit off Opus.
-    #                  Cost/quota trade-off, NOT a quality change.
+    # The critic checks format and score-delta consistency after delivery.
     "ai_scoring_audit_batch_size":    10,
     "ai_scoring_audit_workers":       4,
     "ai_scoring_audit_critic_rounds": 2,
-    "ai_scoring_audit_critic_model":  "sonnet",
+    "ai_scoring_audit_critic_model":  None,  # OINK_CODEX_MODEL / Codex default
 
     # Liveness verifier moved to send-time (telegram_client) in v2.1 —
-    # only the postings that survived scoring + ⭐ floor get a Haiku
+    # only the postings that survived scoring + ⭐ floor get a Codex
     # WebFetch verification. Per-pool pre-enrich verification was 90+ min
-    # of wasted Haiku calls. The toggle below is left as a no-op for
+    # of wasted Codex calls. The toggle below is left as a no-op for
     # back-compat with operators who set it; remove on next major bump.
     "ai_pre_enrich_liveness": False,
 
@@ -336,20 +262,14 @@ DEFAULTS: dict = {
     "browser_fetch_fallback_enabled": True,
     "browser_fetch_timeout_s":        30,
 
-    # Chrome-agent fallback tier — a LAST resort beyond the headless-playwright
-    # tier above. When enabled, an adapter that is hard-blocked (Cloudflare /
-    # DataDome / paywall that even headless chromium can't clear) can drive the
-    # OPERATOR's real, logged-in desktop Chrome via `claude -p --chrome` plus
-    # the claude-in-chrome MCP. The agent navigates, waits for load, and
-    # extracts listings / page text from the rendered page. This commandeers
-    # the operator's desktop browser, so it is strictly opt-in and OFF by
-    # default — when OFF, every adapter behaves EXACTLY as today (the helper
-    # returns []/"" immediately, with NO subprocess spawned).
+    # Last-resort desktop Chrome recovery through Playwright CDP + Codex.
+    # Start an operator-controlled Chrome with remote debugging enabled and
+    # set OINK_CHROME_CDP_URL (default http://127.0.0.1:9222). This uses the
+    # browser's logged-in session, so it remains strictly opt-in.
     "chrome_agent_fallback_enabled": False,   # Production-safe default: do not prompt for operator Chrome access in unattended runs. Enable manually only for interactive recovery.
-    "chrome_agent_device_id": "",             # Empty means use the active connected Chrome; set only when a stable deviceId is known.
     "chrome_agent_timeout_s": 240,            # per-call cap for the agentic browser fetch.
 
-    # Per-scrape timeout for Claude-CLI-backed adapters (curated_boards).
+    # Per-scrape timeout for Codex-CLI-backed adapters (curated_boards).
     # Bumped 180→360 (2026-06-24): 180s was the single largest timeout
     # source (~12 fails/3d in run_p_with_tools) — the agentic WebFetch
     # drill-through on curated boards routinely overran. 360s halves the

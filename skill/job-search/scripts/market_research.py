@@ -1,6 +1,6 @@
 """Deep market-research orchestrator for the `/marketresearch` Telegram bot command.
 
-Spawns up to 10 parallel Claude-Opus sub-agents — each restricted to
+Spawns up to 10 parallel Codex-Codex sub-agents — each restricted to
 WebSearch + WebFetch — that each own a narrow research topic (demand,
 history, salary, company landscape, etc.). Once the workers settle (or the
 overall deadline trips), a manager/synthesizer agent with NO tools receives
@@ -26,7 +26,7 @@ Design mirrors `profile_builder.py`:
   • **Test-friendly injection.** Both `run_worker` and
     `synthesize_with_manager` accept a `_run_p_with_tools=` parameter, and
     `run_all` accepts `_run_worker=`. Offline smoke tests inject stubs to
-    avoid touching the real `claude` CLI.
+    avoid touching the real `codex` CLI.
 """
 from __future__ import annotations
 
@@ -42,14 +42,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from claude_cli import (
+from codex_cli import (
     TOOLS_DENY_SHELL_FS,
     TOOLS_DENY_WEB_AND_SHELL_FS,
     TOOLS_WEB_BOTH,
     extract_assistant_text,
     parse_json_block,
-    run_p,
-    run_p_with_tools,
+    MID_MODEL,
 )
 from instrumentation.wrappers import wrapped_run_p_with_tools
 
@@ -57,11 +56,11 @@ from instrumentation.wrappers import wrapped_run_p_with_tools
 def _instrumented_run_p_with_tools(prompt, **kwargs):
     """Default `_run_p_with_tools` for market_research WORKER calls.
 
-    Records every Claude CLI invocation to the `claude_calls` telemetry table
+    Records every Codex CLI invocation to the `claude_calls` telemetry table
     under caller='market_research'. Workers are genuinely agentic (up to 10
     WebSearch + 15 WebFetch calls each, deciding mid-run whether to keep
     searching) — no non-agentic equivalent exists yet, so they stay on this
-    Claude-CLI-with-tools path.
+    Codex-CLI-with-tools path.
     """
     return wrapped_run_p_with_tools(None, "market_research", prompt, **kwargs)
 
@@ -90,7 +89,7 @@ log = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL           = os.environ.get("MARKET_RESEARCH_MODEL", "opus")
+DEFAULT_MODEL           = MID_MODEL
 DEFAULT_CONCURRENCY     = int(os.environ.get("MARKET_RESEARCH_CONCURRENCY", "8"))
 DEFAULT_WORKER_TIMEOUT  = int(os.environ.get("MARKET_RESEARCH_WORKER_TIMEOUT_S", "900"))
 DEFAULT_OVERALL_TIMEOUT = int(os.environ.get("MARKET_RESEARCH_OVERALL_TIMEOUT_S", "2100"))
@@ -108,8 +107,8 @@ _HISTORICAL_WINDOW_MONTHS = "24"
 _PROJECTION_WINDOW_MONTHS = "12-18"
 
 # Tool grants delegate to the project-wide canonical constants in
-# `claude_cli` so a future audit only has to look in one place. See
-# `claude_cli.py` for the rationale on the deny list.
+# `codex_cli` so a future audit only has to look in one place. See
+# `codex_cli.py` for the rationale on the deny list.
 _WORKER_ALLOWED_TOOLS    = TOOLS_WEB_BOTH
 _WORKER_DISALLOWED_TOOLS = TOOLS_DENY_SHELL_FS
 _MANAGER_ALLOWED_TOOLS    = ""
@@ -1039,9 +1038,7 @@ def synthesize_with_manager(
     timeout_s: int = DEFAULT_MANAGER_TIMEOUT,
     _run_p_with_tools: Callable = _instrumented_run_p,
 ) -> tuple[dict | None, str | None]:
-    """Run the manager/synthesizer call (Opus by default; Mistral-routable
-    via the "market_research_manager" stage). Returns
-    (report, error)."""
+    """Run the tool-free Codex manager/synthesizer. Returns (report, error)."""
     tmpl = _read_prompt("market_research_manager.txt")
     if not tmpl:
         return None, "prompt_missing"
@@ -1115,7 +1112,7 @@ def market_research_sync(
     `_run_p_with_tools`. When left `None`: if the caller ALSO left
     `_run_p_with_tools` at its default (real production call, no test
     stub), the manager routes through `_instrumented_run_p` — the
-    Mistral-routable path (see market_research_manager conversion). If
+    tool-free Codex synthesis path. If
     the caller DID override `_run_p_with_tools` (e.g. a test stub that
     inspects the prompt to detect worker-vs-manager), that SAME callable
     is reused for the manager call too — preserves every existing test's

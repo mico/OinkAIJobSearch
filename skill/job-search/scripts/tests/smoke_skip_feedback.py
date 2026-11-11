@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline smoke test for skip_feedback.py.
 
-Covers the cases that don't need the real `claude` CLI:
+Covers the cases that don't need the real `codex` CLI:
 
   1. Fresh profile (None) → all four lists merged in, set_user_profile called.
   2. Pre-existing duplicate → dedupe, added list is empty, profile unchanged
@@ -13,7 +13,7 @@ Covers the cases that don't need the real `claude` CLI:
   5. Case-insensitive dedupe — pre-existing ['FinTech'], new 'fintech' →
      not added.
 
-No Telegram, no network, no real Claude CLI. Exits non-zero on any
+No Telegram, no network, no real Codex CLI. Exits non-zero on any
 assertion failure so CI / the shell smoke step can rely on $?.
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ def check(cond: bool, label: str) -> None:
 
 
 def _envelope(payload: dict) -> str:
-    """Wrap a JSON dict in the `claude -p --output-format json` envelope
+    """Wrap a JSON dict in the `codex -p --output-format json` envelope
     that `extract_assistant_text` knows how to unwrap."""
     return json.dumps({"result": json.dumps(payload, ensure_ascii=False)})
 
@@ -318,7 +318,7 @@ db.set_user_profile(cid, json.dumps({
     "exclude_companies": [],
     "stack_antipatterns": [],
 }))
-# Haiku correctly returns nothing (rule 4: location belongs to profile).
+# primary correctly returns nothing (rule 4: location belongs to profile).
 # Without the override, the user would see a confusing model-summary
 # paraphrase. With it, they see an actionable /prefs pointer.
 runner, calls = _make_runner({

@@ -100,7 +100,7 @@ def test_liveness_default_disabled_without_env() -> None:
 def test_fail_open_on_infra_failure_none() -> None:
     """A None verdict from a verifier INFRASTRUCTURE failure (subprocess
     died / timed out / envelope unparseable — tags cli_unavailable,
-    parse_failed, wrappers_import, claude_cli_import) now fails OPEN: the
+    parse_failed, wrappers_import, codex_cli_import) now fails OPEN: the
     model never judged the page, so a flaky verifier must not silently drop
     an already-scored job. Job survives; the infra-error counter fires and
     the closed counter does not."""
@@ -390,7 +390,7 @@ def test_un_careers_routes_to_api_not_llm() -> None:
     # UN API check stubbed OPEN (no network); the LLM verifier must never fire.
     tc._un_careers_listing_still_open = lambda job, timeout_s=90: (True, "ok")  # type: ignore[assignment]
     llm_calls: list[Any] = []
-    tc._web_search_listing_still_open_claude = lambda job, timeout_s=90: (  # type: ignore[assignment]
+    tc._web_search_listing_still_open_codex = lambda job, timeout_s=90: (  # type: ignore[assignment]
         llm_calls.append(job.url) or (False, "closed:generic UN portal")
     )
 
@@ -423,7 +423,7 @@ def test_un_careers_api_closed_drops_without_llm() -> None:
         False, "closed:un_deadline_passed"
     )
     llm_calls: list[Any] = []
-    tc._web_search_listing_still_open_claude = lambda job, timeout_s=90: (  # type: ignore[assignment]
+    tc._web_search_listing_still_open_codex = lambda job, timeout_s=90: (  # type: ignore[assignment]
         llm_calls.append(job.url) or (True, "ok")
     )
 
@@ -494,13 +494,13 @@ def test_verifier_telemetry_records_open() -> None:
 
     # Force the verifier to invoke wrapped_run_p_with_tools but with a
     # stub stdout that decodes to status=open. `extract_assistant_text`
-    # expects the `{"result": "<inner>"}` envelope that `claude -p
+    # expects the `{"result": "<inner>"}` envelope that `codex -p
     # --output-format json` emits.
-    import claude_cli  # noqa: E402
+    import codex_cli  # noqa: E402
     fake_stdout = json.dumps(
         {"result": '{"status": "open", "reason": "apply button visible"}'}
     )
-    claude_cli.run_p_with_tools = lambda *a, **kw: fake_stdout  # type: ignore[assignment]
+    codex_cli.run_p_with_tools = lambda *a, **kw: fake_stdout  # type: ignore[assignment]
     # Also short-circuit the wrappers module's run_p_with_tools symbol
     # (it imports run_p_with_tools at module import time).
     from instrumentation import wrappers as _w  # noqa: E402
@@ -543,9 +543,9 @@ def test_verifier_telemetry_records_unknown() -> None:
     tc._resolve_final_url = lambda u, timeout_s=5.0: u  # type: ignore[assignment]
 
     # Drive the verifier to return None via a stdout that fails parse.
-    import claude_cli  # noqa: E402
+    import codex_cli  # noqa: E402
     bad_stdout = "not-valid-json"
-    claude_cli.run_p_with_tools = lambda *a, **kw: bad_stdout  # type: ignore[assignment]
+    codex_cli.run_p_with_tools = lambda *a, **kw: bad_stdout  # type: ignore[assignment]
     from instrumentation import wrappers as _w  # noqa: E402
     _w.run_p_with_tools = lambda *a, **kw: bad_stdout  # type: ignore[assignment]
 

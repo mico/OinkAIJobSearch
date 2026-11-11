@@ -18,7 +18,7 @@ model's job, guided by rules written into the prompt (see that file).
 Sibling module / template
 --------------------------
 This mirrors `skip_feedback.py`'s shape closely: same prompt-file-on-disk
-loading convention, same `claude_cli` / `instrumentation.wrappers.
+loading convention, same `codex_cli` / `instrumentation.wrappers.
 wrapped_run_p` invocation pattern, same defensive envelope-unwrap +
 `parse_json_block` parsing, same "never raises, degrades to None on any
 failure, never touches stored state on failure" contract. Where
@@ -53,7 +53,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from claude_cli import SMALLEST_MODEL, extract_assistant_text, parse_json_block
+from codex_cli import SMALLEST_MODEL, extract_assistant_text, parse_json_block
 from instrumentation.wrappers import wrapped_run_p
 import forensic
 
@@ -67,7 +67,7 @@ log = logging.getLogger(__name__)
 
 # Cheap/fast tier — same rationale as skip_feedback.py: this is a
 # high-volume-ish, low-stakes-per-call summarization pass, not a
-# from-scratch profile rebuild. Override via CLAUDE_SMALLEST_MODEL.
+# from-scratch profile rebuild. Override via OINK_CODEX_MODEL.
 DEFAULT_MODEL = SMALLEST_MODEL
 DEFAULT_TIMEOUT_S = 60
 

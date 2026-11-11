@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Interactively walks a new self-hoster from a fresh clone to a running Oink bot — Python/pip check, Claude Code CLI check, .env creation (Telegram token + optional APIFY_TOKEN), run-mode choice with a generated cron/launchd/systemd/continuous-mode snippet, and a final getMe smoke test. Use whenever the user says "set up the bot", "/setup", "onboard me", or is running this repo for the first time.
+description: Interactively walks a new self-hoster from a fresh clone to a running Oink bot — Python/pip check, Codex CLI ChatGPT authentication, .env creation (Telegram token + optional APIFY_TOKEN), run-mode choice with a generated cron/launchd/systemd/continuous-mode snippet, and a final getMe smoke test. Use whenever the user says "set up the bot", "/setup", "onboard me", or is running this repo for the first time.
 ---
 
 # setup skill
@@ -26,16 +26,20 @@ rather than re-explaining what's already there.
     `pip install --break-system-packages -r requirements.txt` (or offer the
     venv alternative shown there if the user prefers isolation).
 
-### 2. Claude Code CLI presence + auth
+### 2. Codex CLI presence + ChatGPT auth
 
-- Run `claude --version`. If missing, warn clearly: the job-scoring pipeline
-  (`skill/job-search/scripts/claude_cli.py`) shells out to `claude -p` for
-  every AI scoring call, and degrades to skipping/logging a warning when the
-  binary isn't on PATH — the bot will run but won't score jobs well without
-  it. Point the user at https://docs.claude.com/claude-code for install.
-- If present, a quick `claude -p "say ok" --output-format json` confirms
-  it's authenticated (not just installed). Don't force this if the user is
-  clearly already logged in elsewhere.
+- Run `codex --version` (or the executable specified by `OINK_CODEX_BIN`).
+  If missing, install with `npm install -g @openai/codex`. Every AI feature
+  requires Codex: scoring/audits, profiles, tailoring, fit analysis, contact
+  research, web discovery/liveness checks, and market research. There is no
+  alternate AI-provider fallback.
+- Run `codex login status` as the **same OS user that runs the bot**.
+  If not authenticated with ChatGPT, run `codex login` and complete the
+  ChatGPT sign-in flow; on headless hosts use `codex login --device-auth`.
+  Do not treat another user's login or an API key as the required login.
+- Optional `OINK_CODEX_BIN` selects an absolute executable path and
+  `OINK_CODEX_MODEL` overrides the CLI default for all AI calls. Do not add
+  provider-selection variables. See https://developers.openai.com/codex/auth.
 
 ### 3. Create `.env`
 

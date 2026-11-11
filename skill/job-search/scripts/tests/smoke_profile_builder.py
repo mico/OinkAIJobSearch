@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Offline smoke test for profile_builder.py.
 
-Covers every piece that doesn't need the real `claude` CLI:
+Covers every piece that doesn't need the real `codex` CLI:
 
   1. profile_schema_validate — good fixture passes
   2. profile_schema_validate — bad profiles each surface a specific error
   2b. profile_schema_validate — v5 location patterns pass (hybrid-Spain /
       remote-EU / onsite-Bilbao / remote-earth-except / country-level onsite)
   2c. profile_schema_validate — legacy v3/v2 profiles still LOAD (back-compat)
-  3. build_profile_sync — fixture-backed Opus stub returns OK (v5)
+  3. build_profile_sync — fixture-backed Codex stub returns OK (v5)
   3b. build_profile_sync — location canonicalizer (lowercase/dedupe/alias,
       no country→city expansion)
   4. build_profile_sync — stub that returns malformed text → parse_error
@@ -20,7 +20,7 @@ Covers every piece that doesn't need the real `claude` CLI:
   9. ProfileBuilderQueue — coalesces a trigger arriving during in-flight
  10. _clip_profile — truncates overlong seed_phrases / drops bad ATS domains
 
-No Telegram calls, no network, no real Claude CLI. Exits non-zero on any
+No Telegram calls, no network, no real Codex CLI. Exits non-zero on any
 assertion failure so CI / the shell smoke step can rely on $?.
 """
 from __future__ import annotations
@@ -279,7 +279,7 @@ print("\n3. build_profile_sync — happy-path stub")
 
 
 def _fake_run_p_ok(prompt: str, timeout_s: int, model: str | None = None) -> str:
-    # claude_cli expects the CLI's JSON envelope; we return the same shape.
+    # codex_cli expects the CLI's JSON envelope; we return the same shape.
     body = json.dumps(_good_profile(), ensure_ascii=False)
     return json.dumps({"result": body})
 
@@ -297,7 +297,7 @@ if res.profile is not None:
     check(res.profile.get("built_from", {}).get("resume_sha1") == sha1_hex(
         "Candidate — 5y Vue/React/TS frontend dev, remote EU."
     ), "resume_sha1 stamped by us, not the model")
-    check(res.profile.get("built_from", {}).get("model") == "opus", "model stamped")
+    check(res.profile.get("built_from", {}).get("model") == pb.DEFAULT_MODEL, "model stamped")
     # v5 location lists survive the build path.
     check(res.profile.get("remote_locations") == ["europe", "eu", "spain"],
           "remote_locations preserved through build")

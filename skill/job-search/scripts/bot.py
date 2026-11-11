@@ -50,9 +50,10 @@ sys.path.insert(0, str(HERE))
 from db import DB                         # noqa: E402
 from dedupe import Job                    # noqa: E402
 from resume_tailor import (               # noqa: E402
+    TAILOR_PLAN_VERSION,
     extract_pdf_text,
-    build_tailor_note,
     build_tailor_plan_ai,
+    format_resume_markdown,
 )
 from telegram_client import (             # noqa: E402
     TelegramClient,
@@ -364,9 +365,9 @@ PRIVACY_BODY_MDV2 = (
     + mdv2_escape(
         "• Your résumé, preferences, profile, and application history live "
         "on the bot's server. Nothing is sold or shared for advertising.\n"
-        "• When you tap 'Tailor resume', 'Analyze fit', or run "
-        "/marketresearch, the relevant excerpts of your résumé and the "
-        "posting are sent to Anthropic (Claude) to generate the result.\n"
+        "• AI features, including automatic job scoring and profile builds, "
+        "send relevant résumé excerpts, preferences, feedback, and job "
+        "postings to OpenAI through Codex using the operator's ChatGPT account.\n"
         "• Job postings come from LinkedIn, Indeed, Hacker News, and "
         "curated remote boards — the bot only reads from them, it does "
         "not send them anything about you.\n"
@@ -578,6 +579,8 @@ _SOURCES_CATALOG: list[tuple[str, str]] = [
     ("justjoinit",      "Just Join IT (CEE tech)"),
     ("nofluffjobs",     "NoFluffJobs (CEE tech)"),
     ("ai_jobs_net",     "AI Jobs Net"),
+    ("reddit",          "Reddit hiring subreddits"),
+    ("x_twitter",       "X (Twitter) hiring posts"),
     # Spain / EU local + commercial
     ("infojobs",        "InfoJobs (Spain)"),
     ("tecnoempleo",     "Tecnoempleo (Spain tech)"),
@@ -850,7 +853,7 @@ def _apply_min_score(tg: TelegramClient, db: DB, cb: dict, chat_id: int, msg_id:
                      score: int) -> None:
     """Callback handler for `ms:<n>`: persist score into the DB column.
 
-    v1 stored this in the user_profile JSON, where every Opus rebuild
+    v1 stored this in the user_profile JSON, where every Codex rebuild
     reset it to 0. v2 keeps it in `users.min_match_score` so the user's
     explicit ⭐ tap survives every rebuild and never gets clobbered.
     """
@@ -923,7 +926,7 @@ def _clear_prefs(tg: TelegramClient, db: DB, chat_id: int) -> None:
 # ---------- profile commands ----------
 
 def _show_profile(tg: TelegramClient, db: DB, chat_id: int) -> None:
-    """Render the user's stored profile (Opus-built, schema_version=2).
+    """Render the user's stored profile (Codex-built, schema_version=2).
 
     Falls back to a helpful message when no profile has been built yet. This
     is a READ — it doesn't trigger a rebuild. Use /rebuildprofile for that.
@@ -963,7 +966,7 @@ def _show_profile(tg: TelegramClient, db: DB, chat_id: int) -> None:
 
 
 def _rebuild_profile(tg: TelegramClient, db: DB, chat_id: int) -> None:
-    """Force-enqueue an Opus profile rebuild.
+    """Force-enqueue a Codex profile rebuild.
 
     Skips the queue's debounce window because the user explicitly asked for
     it. The queue still coalesces against an already-running build for the
@@ -1465,24 +1468,24 @@ def _show_admin_stats(tg: TelegramClient, db: DB, chat_id: int) -> None:
 
 
 def _save_prefs_from_text(tg: TelegramClient, db: DB, chat_id: int, text: str) -> None:
-    """Persist the user's free-form preferences text and kick off an Opus
+    """Persist the user's free-form preferences text and kick off an Codex
     rebuild.
 
     Flow:
       1. Bot-boundary safety screen (`safety_check.check_user_input`). The
-         text is about to be foregrounded in a Claude sub-agent that has
+         text is about to be foregrounded in a Codex sub-agent that has
          WebSearch + WebFetch, so a successful prompt injection here could
          pivot the agent off-task and waste the user's tokens. We reject on
          any hit and tell the user WHY so they can rephrase.
       2. Store the raw text verbatim in `users.prefs_free_text` — decoupled
          from the structured profile JSON so it survives rebuilds and can
          feed the builder with the user's exact wording on every run.
-      3. Enqueue a debounced Opus rebuild; the queue handles in-flight,
+      3. Enqueue a debounced Codex rebuild; the queue handles in-flight,
          coalescing, and user-facing "rebuilt" pings.
     """
     # Boundary screen — runs synchronously on the polling thread because it's
     # cheap (regex only by default). If it blocks we never enqueue the
-    # builder and the text never reaches any downstream Claude call.
+    # builder and the text never reaches any downstream Codex call.
     verdict = check_user_input(text)
     if verdict.get("verdict") == "block":
         db.set_awaiting_state(chat_id, None)
@@ -1602,7 +1605,7 @@ def _handle_skip_reason_text(
 
     Contract:
       • `skip` / Cancel → clear state, no feedback recorded.
-      • `safety_check` block → reject + clear state, never reach Claude.
+      • `safety_check` block → reject + clear state, never reach Codex.
       • Else → import skip_feedback (sibling-agent module) and call
         apply_skip_feedback with the captured job_context payload. Surface
         the returned summary to the user. Always clear state on the way out.
@@ -1624,7 +1627,7 @@ def _handle_skip_reason_text(
         return
 
     # Boundary safety screen — same gate as /prefs / /marketresearch. The
-    # reason text will be foregrounded in a Claude call inside
+    # reason text will be foregrounded in a Codex call inside
     # skip_feedback, so injection attempts must not slip past this layer.
     verdict = check_user_input(text)
     if verdict.get("verdict") == "block":
@@ -1928,11 +1931,11 @@ def _enqueue_profile_rebuild(
     *,
     trigger: str,
 ) -> None:
-    """Read the user's resume_text + /prefs free-text and schedule an Opus
+    """Read the user's resume_text + /prefs free-text and schedule an Codex
     rebuild. Fire-and-forget; the queue handles debounce, in-flight, and
     progress messages.
 
-    The free_text fed to Opus is `prefs_free_text` plus any accumulated
+    The free_text fed to Codex is `prefs_free_text` plus any accumulated
     skip-reason comments (rolling buffer). That way every "not a fit"
     comment the user wrote shapes the next profile rebuild — locations,
     languages, seniority — without forcing the user to re-edit /prefs.
@@ -2066,7 +2069,7 @@ def handle_document(tg: TelegramClient, db: DB, chat_id: int, doc: dict, user: d
             f"You'll start getting the daily digest at the next scheduled run. "
             f"Use /help any time."
         )
-        # Kick off the Opus-backed profile rebuild in the background. The
+        # Kick off the Codex-backed profile rebuild in the background. The
         # wizard defers this until its final step so we only run it once
         # the user has given all their signals; outside the wizard, the
         # moment a new resume arrives is the right time to rebuild.
@@ -2560,11 +2563,19 @@ def _handle_callback_inner(
             tg.answer_callback(cb_id, "Upload your CV first (PDF).", show_alert=True)
             return
         tg.answer_callback(cb_id, "Analyzing your resume vs. this role…")
-        _start_tailor_dialog(tg, db, chat_id, job_id, job, dict(row), user["resume_text"])
+        _start_tailor_dialog(tg, db, chat_id, job_id, job, dict(row),
+                             user["resume_text"], resume_path=user["resume_path"])
 
     elif kind == "ra":  # tailor — Apply: send the rewritten resume as a document
-        tg.answer_callback(cb_id, "Preparing your tailored resume…")
-        _apply_tailor(tg, db, chat_id, msg_id, job_id, job)
+        lock = _tailor_lock(chat_id, job_id)
+        if not lock.acquire(blocking=False):
+            tg.answer_callback(cb_id, "Tailoring is still in progress. Try again shortly.")
+            return
+        try:
+            tg.answer_callback(cb_id, "Preparing your tailored resume…")
+            _apply_tailor(tg, db, chat_id, msg_id, job_id, job)
+        finally:
+            lock.release()
 
     elif kind == "rd":  # tailor — Dismiss
         tg.answer_callback(cb_id, "Dismissed.")
@@ -2604,8 +2615,8 @@ _RESEARCH_LOCKS: dict[int, threading.Lock] = {}
 _RESEARCH_LOCKS_GUARD = threading.Lock()
 
 # Global cap on concurrent /marketresearch runs ACROSS users. One run is 10
-# Opus workers + a manager — N parallel runs = N×11 Opus calls competing for
-# one Anthropic API key, which trips 429s and burns the operator's quota.
+# Codex workers + a manager — concurrent runs share the operator's
+# ChatGPT usage limits.
 # Default 2 (raise via env if you have headroom). Bounded so excess release()
 # raises rather than silently incrementing past the cap.
 _MAX_CONCURRENT_RESEARCH = max(1, int(os.environ.get("MAX_CONCURRENT_RESEARCH", "2")))
@@ -2655,7 +2666,7 @@ def _has_real_profile(profile: dict | None) -> bool:
 
 _RESEARCH_PROMPT = (
     "🔬 *Market research — deep scan*\n\n"
-    "I'll run a \\~25\\-40 minute background job that fans out to *10 Opus "
+    "I'll run a \\~25\\-40 minute background job that fans out to *10 Codex "
     "sub\\-agents* \\(demand, salary at home & neighbours, current trends, "
     "historical shifts, skills match, projections, top employers, hiring bar, "
     "upskilling roadmap\\) and then hands their findings to a manager agent "
@@ -2722,7 +2733,7 @@ def _save_research_location_and_kick(
     """Validate the location text, resolve it (possibly falling back to the
     profile), and kick off the background research run.
 
-    The location flows into Opus sub-agents equipped with WebSearch and
+    The location flows into Codex sub-agents equipped with WebSearch and
     WebFetch, so we run it through `safety_check.check_user_input` first —
     same gate as /prefs. On block we clear state and tell the user why.
     """
@@ -2782,8 +2793,8 @@ def _save_research_location_and_kick(
             chat_id,
             mdv2_escape(
                 f"⏳ /marketresearch is rate-limited per user. Try again in "
-                f"~{mins} minute(s). One run is 10 Opus subagents — the cap "
-                "keeps the operator's API budget intact."
+                f"~{mins} minute(s). One run is 10 Codex subagents — the cap "
+                "keeps the operator's ChatGPT quota intact."
             ),
             reply_markup=reply_keyboard(db, chat_id),
         )
@@ -2801,7 +2812,7 @@ def _save_research_location_and_kick(
         return
 
     # Global concurrent-run cap across ALL users. Protects the operator's
-    # single Anthropic API key from 10*N parallel Opus calls.
+    # ChatGPT account from 10*N parallel Codex calls.
     if not _RESEARCH_GLOBAL_SEM.acquire(blocking=False):
         lock.release()
         tg.send_message(
@@ -2819,7 +2830,7 @@ def _save_research_location_and_kick(
             chat_id,
             mdv2_escape(
                 f"🔬 Market research starting for {location} — fanning out to "
-                "10 Opus subagents. Expect ~25-40 minutes. I'll post progress "
+                "10 Codex subagents. Expect ~25-40 minutes. I'll post progress "
                 "updates here and attach a .docx report at the end."
             ),
             reply_markup=reply_keyboard(db, chat_id),
@@ -2948,7 +2959,7 @@ def _run_market_research_work(
                 n_total = n_ok + len(run.workers_failed)
                 caption = (
                     f"Market research — {run.status} · "
-                    f"{run.model or 'opus'} · {elapsed_min} min · "
+                    f"{run.model or 'Codex'} · {elapsed_min} min · "
                     f"{n_ok}/{n_total} subagents ok"
                 )
                 try:
@@ -3034,7 +3045,7 @@ def _run_market_research_work(
             err_head = (run.error or "")[:200]
             if run.status == "cli_missing":
                 body = (
-                    "⚠️ Market research couldn't start — the `claude` CLI "
+                    "⚠️ Market research couldn't start — the `codex` CLI "
                     "isn't available. Ask the admin to install / log in "
                     "(then retry /marketresearch)."
                 )
@@ -3114,7 +3125,7 @@ def _run_market_research_work(
 # without the Apply/Dismiss step — fit analysis is read-only.
 #
 # Cache semantics (see db.fit_analyses):
-#   - A cache hit with the CURRENT resume_sha1 → render instantly, no Claude call.
+#   - A cache hit with the CURRENT resume_sha1 → render instantly, no Codex call.
 #   - A cache hit with a stale hash → ignore, run fresh.
 #   - No cached row → run fresh and persist.
 
@@ -3124,7 +3135,7 @@ _FIT_LOCKS_GUARD = threading.Lock()
 
 def _fit_lock(chat_id: int, job_id: str) -> threading.Lock:
     """Per-(chat, job) lock so double-taps on Analyze fit don't spin two
-    parallel Claude calls. Kept in-process (rare contention, restarts clear)."""
+    parallel Codex calls. Kept in-process (rare contention, restarts clear)."""
     key = (chat_id, job_id)
     with _FIT_LOCKS_GUARD:
         lk = _FIT_LOCKS.get(key)
@@ -3148,7 +3159,7 @@ def _start_fit_analysis(
     render. No lock needed — cache reads are cheap.
 
     Cache-miss path: acquire the per-(chat, job) lock, send a placeholder,
-    fire a background worker that calls the Claude CLI, render + store on
+    fire a background worker that calls the Codex CLI, render + store on
     success, edit the placeholder with the result.
     """
     current_sha1 = _fit.resume_sha1(resume_text)
@@ -3205,7 +3216,7 @@ def _start_fit_analysis(
                     tg.edit_message_text(
                         chat_id, placeholder_id,
                         mdv2_escape(
-                            "Couldn't analyze this posting. The `claude` CLI "
+                            "Couldn't analyze this posting. The `codex` CLI "
                             "may be missing or the model returned an "
                             "unparseable response. Try again in a minute."
                         ),
@@ -3273,6 +3284,8 @@ def _start_tailor_dialog(
     job: Job,
     row: dict,
     resume_text: str,
+    *,
+    resume_path: str | None = None,
 ) -> None:
     """Send a placeholder message, then run the AI tailor in a background
     thread and edit the placeholder with the suggestions + Apply/Dismiss buttons.
@@ -3294,27 +3307,35 @@ def _start_tailor_dialog(
 
     def _work():
         try:
-            plan = build_tailor_plan_ai(resume_text, row)
-            if plan is None:
-                # Fallback: use the heuristic note and offer it as a direct attachment
-                # (no Apply button — nothing to apply against).
-                note = build_tailor_note(resume_text, row)
-                out = user_dir(chat_id) / "tailored" / f"{job_id}.md"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(note)
+            source_text = resume_text
+            pdf = USERS_DIR / str(chat_id) / "resume.pdf"
+            if not pdf.is_file() and resume_path:
+                pdf = Path(resume_path)
+            if pdf.is_file():
                 try:
-                    tg.edit_message_text(
-                        chat_id, placeholder_id,
-                        mdv2_escape(
-                            "AI tailor unavailable (is the `claude` CLI installed and logged in?). "
-                            "Sending the heuristic tailoring note instead."
-                        ),
-                        reply_markup={"inline_keyboard": []},
-                    )
+                    extracted = extract_pdf_text(pdf, for_tailoring=True)
+                    if extracted.strip():
+                        source_text = extracted
                 except Exception:
-                    pass
-                tg.send_document(chat_id, out, caption=f"Tailoring note: {job.title[:60]}")
+                    log.warning("tailor: could not re-extract the saved PDF", exc_info=True)
+            plan = build_tailor_plan_ai(source_text, row)
+            if plan is None:
+                tg.edit_message_text(
+                    chat_id, placeholder_id,
+                    mdv2_escape("Couldn’t prepare the tailoring edits. Please try Tailor resume again."),
+                    reply_markup={"inline_keyboard": []},
+                )
                 return
+
+            markdown = format_resume_markdown(plan["tailored_resume_markdown"], plan.pop("joined_words", None))
+            if markdown is None:
+                tg.edit_message_text(
+                    chat_id, placeholder_id,
+                    mdv2_escape("Couldn’t verify the formatted resume. Please try Tailor resume again."),
+                    reply_markup={"inline_keyboard": []},
+                )
+                return
+            plan["tailored_resume_markdown"] = markdown
 
             db.upsert_suggestion(
                 chat_id, job_id,
@@ -3353,7 +3374,7 @@ def _apply_tailor(
     job: Job,
 ) -> None:
     row = db.get_suggestion(chat_id, job_id)
-    if row is None:
+    if row is None or row["message_id"] != msg_id:
         tg.send_plain(chat_id, "That tailor plan is no longer available. Click ✍️ Tailor my resume again.")
         return
     try:
@@ -3362,6 +3383,9 @@ def _apply_tailor(
         tg.send_plain(chat_id, "Could not read the stored tailor plan.")
         return
 
+    if not isinstance(plan, dict) or plan.get("version") != TAILOR_PLAN_VERSION:
+        tg.send_plain(chat_id, "Tap ✍️ Tailor my resume again to generate a download from the suggested edits.")
+        return
     md = (plan.get("tailored_resume_markdown") or "").strip()
     if not md:
         tg.send_plain(chat_id, "The plan didn't include a rewritten resume — try tailoring again.")
@@ -3369,17 +3393,17 @@ def _apply_tailor(
 
     out = user_dir(chat_id) / "tailored" / f"{job_id}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    header = (
-        f"# Tailored resume — {job.title or 'Role'}\n"
-        f"**Company:** {job.company or ''}  \n"
-        f"**Location:** {job.location or ''}  \n"
-        f"**Posting:** {job.url or ''}\n\n"
-        "---\n\n"
-    )
-    out.write_text(header + md)
+    out.write_text(md + "\n", encoding="utf-8")
+
+    try:
+        caption = f"Tailored resume for {job.title[:60]}"
+        tg.send_document(chat_id, out, caption=caption)
+    except Exception as e:
+        log.exception("tailor: send_document failed")
+        tg.send_plain(chat_id, f"⚠️ Could not send the file: {e}")
+        return
 
     db.set_suggestion_status(chat_id, job_id, "applied")
-
     try:
         tg.edit_reply_markup(
             chat_id, msg_id,
@@ -3388,13 +3412,6 @@ def _apply_tailor(
         )
     except Exception as e:
         log.warning("edit markup failed (ra): %s", e)
-
-    try:
-        caption = f"Tailored resume for {job.title[:60]}"
-        tg.send_document(chat_id, out, caption=caption)
-    except Exception as e:
-        log.exception("tailor: send_document failed")
-        tg.send_plain(chat_id, f"⚠️ Could not send the file: {e}")
 
 
 # ---------- continuous searcher (Phase 3) ----------
@@ -3757,7 +3774,7 @@ def _maybe_start_continuous_searcher(db: DB) -> list[threading.Thread] | None:
     interval, min_sleep = _continuous_interval_and_floor()
 
     # Stagger across the chat_id list so N users don't all fire scoring
-    # concurrently (cuts peak Claude-API load by N×). Stagger = interval/N:
+    # concurrently (cuts peak Codex-API load by N×). Stagger = interval/N:
     # at N=2 with interval=3600, chat[0] fires at T, chat[1] at T+1800.
     n = len(chat_ids)
     stagger_step = interval // n if n > 0 else 0
@@ -4033,6 +4050,15 @@ def main() -> int:
     except Exception:
         log.exception("redirect_server: failed to start; continuing without it")
 
+    social_receiver = None
+    try:
+        from social_browser import start_social_browser_server
+        social_receiver = start_social_browser_server()
+    except Exception as exc:
+        # Configuration errors are actionable, but never include credentials.
+        log.error("social_browser: failed to start (%s): %s", type(exc).__name__,
+                  str(exc) if isinstance(exc, ValueError) else "check cache permissions and port 8766")
+
     # Continuous searcher (Phase 3). OFF by default — flip on with
     # OINK_CONTINUOUS_MODE=1 + OINK_CONTINUOUS_CHAT_ID=<chat_id> in the
     # environment. See README + deploy/README for the production setup.
@@ -4112,6 +4138,8 @@ def main() -> int:
                 # main loop alive (mirrors prior behavior).
                 log.exception("update handler crashed; continuing")
 
+    if social_receiver is not None:
+        social_receiver.close()
     log.info("Bot stopped cleanly.")
     return 0
 

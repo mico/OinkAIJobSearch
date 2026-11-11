@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
@@ -146,7 +147,7 @@ def main() -> int:
     import pig_stickers as _ps
     _ps.STICKER_FILE_IDS.clear()
 
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory() as td, patch.object(ob, "wrapped_run_p", return_value=None):
         db_path = Path(td) / "jobs.db"
         db = DB(db_path)
         tg = FakeTelegramClient()
@@ -270,7 +271,7 @@ def main() -> int:
         # The AUTHORITATIVE ⭐ gate is the DB column, not the profile JSON.
         _assert(db.get_min_match_score(chat_id) == 3,
                 f"DB min_match_score column should be 3, got {db.get_min_match_score(chat_id)}")
-        # finalize must kick the deferred Opus build, exactly once.
+        # finalize must kick the deferred Codex build, exactly once.
         _assert(cap.builds == [(chat_id, "onboarding")],
                 f"finalize must enqueue one 'onboarding' profile build, got {cap.builds}")
         _assert(db.get_onboarding_completed_at(chat_id) is not None,

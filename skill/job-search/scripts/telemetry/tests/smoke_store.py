@@ -147,7 +147,7 @@ with tempfile.TemporaryDirectory() as td:
     expected_haiku = int(round(1000 * _PRICES["haiku"]["in"] + 100 * _PRICES["haiku"]["out"]))
     expected_sonnet = int(round(1000 * _PRICES["sonnet"]["in"] + 100 * _PRICES["sonnet"]["out"]))
     expected_opus = int(round(1000 * _PRICES["opus"]["in"] + 100 * _PRICES["opus"]["out"]))
-    expected_default = int(round(1000 * _PRICES[None]["in"] + 100 * _PRICES[None]["out"]))
+    expected_default = 0  # Subscription billing is not derivable from usage.
 
     check(estimate_cost_us("haiku", PROMPT, OUT) == expected_haiku,
           f"cost haiku == {expected_haiku} (got {estimate_cost_us('haiku', PROMPT, OUT)})")
@@ -156,12 +156,11 @@ with tempfile.TemporaryDirectory() as td:
     check(estimate_cost_us("opus", PROMPT, OUT) == expected_opus,
           f"cost opus == {expected_opus}")
     check(estimate_cost_us(None, PROMPT, OUT) == expected_default,
-          f"cost None falls back to opus rates ({expected_default})")
-    check(expected_default == expected_opus, "None default and opus produce same cost (pessimistic)")
-    # Unknown model alias falls back to None entry too.
-    check(estimate_cost_us("unknown_alias", PROMPT, OUT) == expected_default,
-          "unknown alias falls back to opus rates")
-    check(_CHARS_PER_TOKEN == 4.0, "_CHARS_PER_TOKEN == 4.0")
+          f"default model has no fabricated subscription cost ({expected_default})")
+    check(estimate_cost_us("gpt-5-codex", PROMPT, OUT) == 0,
+          "Codex usage does not inherit historical API pricing")
+    check(estimate_cost_us("unknown_alias", PROMPT, OUT) == 0,
+          "unknown models have no fabricated cost")
 
     # Persist one call per model and verify cost_estimate_us round-trips.
     cstart = time.time()

@@ -45,7 +45,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from db import DB  # noqa: E402
 from telemetry import MonitorStore, CallStatus, migrate  # noqa: E402
-from claude_cli import extract_assistant_text  # noqa: E402
+from codex_cli import extract_assistant_text  # noqa: E402
 from instrumentation import wrappers as _wrappers  # noqa: E402
 
 

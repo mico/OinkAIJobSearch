@@ -2,7 +2,7 @@
 """Smoke test for `enrich_jobs_ai` partial-batch targeted re-ask.
 
 Reproduces the failure mode observed in the 2026-05-02 10:00-10:30 CEST
-cron run: Haiku consistently dropped exactly 1 verdict per 25-job batch
+cron run: primary consistently dropped exactly 1 verdict per 25-job batch
 (every user, batch 4/5). The original code logged this as
 `failure_reason=partial` and moved on without retrying — silently losing
 1 verdict per user per run.
@@ -70,7 +70,7 @@ class _FakeJob:
 
 
 def _make_jobs(n: int) -> list[_FakeJob]:
-    return [_FakeJob(external_id=f"ext-{i:04d}") for i in range(n)]
+    return [_FakeJob(external_id=f"ext-{i:04d}", url=f"https://example.com/job/ext-{i:04d}") for i in range(n)]
 
 
 def _envelope(inner: dict) -> str:
@@ -126,7 +126,7 @@ def test_partial_recovered_via_targeted_reask() -> None:
     def fake_wrapped_run_p(store, caller, prompt, **kwargs):
         present = [j for j in jobs if j.external_id in prompt]
         call_log.append([j.external_id for j in present])
-        # First call: simulate Haiku dropping `dropped_id` mid-list.
+        # First call: simulate primary dropping `dropped_id` mid-list.
         # Subsequent calls: return verdicts for whatever is in the prompt.
         if len(call_log) == 1:
             return _full_response([j for j in present if j.external_id != dropped_id])

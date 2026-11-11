@@ -434,11 +434,11 @@ check(len(store4.error_rows) == 0, "BaseException is NOT recorded")
 
 
 # ---------------------------------------------------------------------------
-# 5. wrappers — claude_cli passthrough with monkeypatched run_p
+# 5. wrappers — Codex transport passthrough with monkeypatched run_p
 # ---------------------------------------------------------------------------
 print("\n5. wrappers")
 
-import claude_cli  # noqa: E402
+import codex_cli  # noqa: E402
 import instrumentation.wrappers as W  # noqa: E402
 
 # Happy path — non-empty stdout → status='ok'
@@ -451,7 +451,7 @@ try:
     store = FakeStore()
     out = W.wrapped_run_p(
         store, caller="job_enrich", prompt="x" * 100,
-        chat_id=42, pipeline_run_id=7, model="haiku",
+        chat_id=42, pipeline_run_id=7, model="gpt-5.4-mini",
     )
     check(out == "hello", "wrapped_run_p returns underlying stdout")
     check(len(store.claude_rows) == 1, "wrapped_run_p records a row")
@@ -461,7 +461,7 @@ try:
     check(row["output_chars"] == 5, "output_chars=len(stdout)")
     check(row["caller"] == "job_enrich", "caller propagated")
     check(row["pipeline_run_id"] == 7, "pipeline_run_id propagated")
-    check(row["model"] == "haiku", "model propagated")
+    check(row["model"] == "gpt-5.4-mini", "model propagated")
 finally:
     W.run_p = orig_run_p
 
@@ -491,7 +491,7 @@ try:
     store = FakeStore()
     out = W.wrapped_run_p_with_tools(
         store, caller="market_research:worker",
-        prompt="hi", model="opus",
+        prompt="hi", model="gpt-5.4",
     )
     check(out == "tooled", "wrapped_run_p_with_tools passthrough")
     check(store.claude_rows[0]["status"] == "ok", "tools status=ok")

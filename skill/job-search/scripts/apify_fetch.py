@@ -73,9 +73,6 @@ DEFAULT_ACTOR_OWNER = os.environ.get("APIFY_ACTOR_OWNER", "nomad-agent")
 # deliberately ABSENT: they run inside the recipient loop with profile seeds,
 # not in the global fetch, so they're out of scope for this fetch-layer A/B.
 #
-# One local source key has NO live actor and is omitted on purpose:
-#   * curated_boards     — BYOK actor not deployed under this account
-#
 # academicpositions + wellfound DO have actors now (proxy+browser scrapers that
 # clear Cloudflare BFM / DataDome — see apify/{academicpositions,wellfound}-
 # scraper/). They are EXPERIMENTAL: the anti-bot gates block local verification,
@@ -101,7 +98,6 @@ ACTOR_MAP: dict[str, str] = {
     "wttj":             "wttj-scraper",
     "builtin":          "builtin-scraper",
     "impactpool":       "impactpool-scraper",
-    "devex":            "devex-scraper",
     "justjoinit":       "justjoinit-scraper",
     "nofluffjobs":      "nofluffjobs-scraper",
     # Experimental — proxy+browser actors, default OFF until live smoke verifies.
@@ -109,12 +105,9 @@ ACTOR_MAP: dict[str, str] = {
     "wellfound":         "wellfound-scraper",
 }
 
-# Actors that need an Anthropic key passed as input (they call Claude
-# internally — "bring your own key"). Skipped unless ANTHROPIC_API_KEY is set.
-# ub_doctoral left this set on 2026-07-13: it now parses UB's own vacancy board
-# (seu.ub.edu) directly instead of asking an LLM, so it needs no key and must
-# not be skipped when one is absent.
-BYOK_SOURCES: frozenset[str] = frozenset({"devex"})
+# AI-dependent sources always run in-process with the authenticated Codex CLI.
+# Never send provider credentials to a hosted actor.
+LOCAL_AI_SOURCES: tuple[str, ...] = ("devex", "curated_boards")
 
 # Per-actor input schema caps that are stricter than the pipeline-wide
 # ``max_per_source`` default. Keep this about transport/schema invariants, not
@@ -414,8 +407,6 @@ def build_input(
     filters: dict,
     *,
     cache_ttl: int,
-    anthropic_key: str | None = None,
-    mistral_key: str | None = None,
     queries: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the actor input for one source.
@@ -434,15 +425,7 @@ def build_input(
     source, so a caller can pass one list unconditionally.
 
     Extra input fields the actor's schema doesn't declare are ignored by the
-    platform (schemas here don't set ``additionalProperties:false``), so a
-    universal input is safe across actors with differing schemas. BYOK actors
-    additionally get ``anthropicApiKey`` when a key is available, or —
-    project preference is Mistral over Anthropic (see repo CLAUDE.md) —
-    ``provider="mistral"`` + ``mistralApiKey`` when only a Mistral key is
-    available (the actor's own ``_resolve_provider`` also infers "mistral"
-    from a mistralApiKey alone, but we set ``provider`` explicitly so intent
-    isn't left to inference). Anthropic wins if both happen to be set, since
-    ``anthropicApiKey`` was the actor's original/default provider.
+    platform, so universal transport knobs are safe across scraping actors.
     """
     max_items = _max_items_for_source(key, filters)
     inp: dict[str, Any] = {
@@ -459,12 +442,6 @@ def build_input(
             # One query per actor run — the dispatcher fans out N runs and
             # passes a single-element list per call.
             inp[QUERY_SINGLE_PARAM[key]] = cleaned[0]
-    if key in BYOK_SOURCES:
-        if anthropic_key:
-            inp["anthropicApiKey"] = anthropic_key
-        elif mistral_key:
-            inp["provider"] = "mistral"
-            inp["mistralApiKey"] = mistral_key
     return inp
 
 
@@ -527,8 +504,6 @@ def call_actor(
     owner: str,
     cache_ttl: int,
     run_timeout: int,
-    anthropic_key: str | None,
-    mistral_key: str | None = None,
     session: requests.Session | None = None,
     queries: list[str] | None = None,
 ) -> tuple[str, list[Job], str | None, float]:
@@ -540,8 +515,7 @@ def call_actor(
     the orchestrator can keep going, exactly like ``_fetch_one_source``.
     """
     actor = ACTOR_MAP[key]
-    inp = build_input(key, filters, cache_ttl=cache_ttl, anthropic_key=anthropic_key,
-                      mistral_key=mistral_key, queries=queries)
+    inp = build_input(key, filters, cache_ttl=cache_ttl, queries=queries)
     max_items = _max_items_for_source(key, filters)
 
     url = f"{API_BASE}/{owner}~{actor}/run-sync-get-dataset-items"
@@ -633,8 +607,6 @@ def fetch_all_apify(
     run_timeout: int = 600,
     workers: int = 6,
     only: list[str] | None = None,
-    anthropic_key: str | None = None,
-    mistral_key: str | None = None,
     queries: list[str] | dict[str, list] | None = None,
     db: Any = None,
     result_cache_s: int = 0,
@@ -649,9 +621,8 @@ def fetch_all_apify(
 
     ``only`` restricts to a subset of source keys (intersected with the
     enable-gate). ``cache_ttl=0`` cache-busts (that flag controls the
-    ACTOR's own internal cache; see the module docstring). BYOK actors are
-    skipped (and recorded as ``skipped``) unless an Anthropic key is
-    available. ``queries`` (opt-in) is forwarded to QUERY_ARRAY_PARAM
+    actor's own internal cache). AI-dependent sources run locally via Codex.
+    ``queries`` (opt-in) is forwarded to QUERY_ARRAY_PARAM
     sources only, replacing those actors' built-in default seed lists;
     everything else stays broad. Accepts a flat list (applied to every
     query-array source) or a per-source dict —
@@ -671,17 +642,7 @@ def fetch_all_apify(
     every call to hit live upstream — e.g. ``apify_compare.py``'s A/B
     report, where a cache hit would bias the comparison.
     """
-    token = resolve_token(token)
-    if not token:
-        return [], ["apify: no APIFY_TOKEN (env or apify/un-careers-scraper/.env)"], []
     owner = owner or DEFAULT_ACTOR_OWNER
-    anthropic_key = anthropic_key or (os.environ.get("ANTHROPIC_API_KEY") or "").strip() or None
-    # Project preference is Mistral over Anthropic (see repo CLAUDE.md / the
-    # project's mistral-routing-decisions note) — the bot's own env carries
-    # MISTRAL_API_KEY, not ANTHROPIC_API_KEY, so without this fallback these
-    # BYOK actors were skipped on every run. All three support
-    # provider="mistral" + mistralApiKey (see build_input).
-    mistral_key = mistral_key or (os.environ.get("MISTRAL_API_KEY") or "").strip() or None
 
     keys = enabled_apify_sources(filters)
     if only:
@@ -691,17 +652,41 @@ def fetch_all_apify(
     jobs: list[Job] = []
     errors: list[str] = []
     meta: list[dict] = []
-    to_run: list[str] = []
-
-    for key in keys:
-        if key in BYOK_SOURCES and not anthropic_key and not mistral_key:
-            meta.append({
-                "source": key, "actor": ACTOR_MAP[key], "count": 0,
-                "seconds": 0.0, "error": None,
-                "skipped": "BYOK: no ANTHROPIC_API_KEY or MISTRAL_API_KEY",
-            })
-            continue
-        to_run.append(key)
+    from sources.curated_boards import BOARDS
+    enabled = filters.get("sources") or {}
+    local_keys = [
+        key for key in LOCAL_AI_SOURCES
+        if (any(enabled.get(board, False) for board in BOARDS)
+            if key == "curated_boards" else enabled.get(key, False))
+        and (not only or key in only)
+    ]
+    seen_local: set[str] = set()
+    for key in local_keys:
+        started = time.time()
+        err = None
+        source_jobs = []
+        try:
+            from importlib import import_module
+            source_jobs = import_module(f"sources.{key}").fetch(filters, db=db)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {str(exc)[:160]}"
+            errors.append(f"{key}: {err}")
+        fresh = []
+        for job in source_jobs:
+            if job.job_id not in seen_local:
+                seen_local.add(job.job_id)
+                fresh.append(job)
+        jobs.extend(fresh)
+        meta.append({
+            "source": key, "actor": None, "backend": "codex",
+            "count": len(fresh), "seconds": round(time.time() - started, 2),
+            "error": err, "skipped": None,
+        })
+    to_run = [key for key in keys if key not in LOCAL_AI_SOURCES]
+    token = resolve_token(token)
+    if to_run and not token:
+        errors.append("apify: no APIFY_TOKEN (env or apify/un-careers-scraper/.env)")
+        return jobs, errors, meta
 
     if not to_run:
         return jobs, errors, meta
@@ -744,7 +729,7 @@ def fetch_all_apify(
     # must NOT opt in.
     to_dispatch: list[tuple[str, list[str] | None]] = []
     cache_hits = 0
-    seen_job_ids: set[str] = set()
+    seen_job_ids: set[str] = set(seen_local)
 
     def _use_jobs(key: str, dq: list[str] | None, src_jobs: list[Job],
                    err: str | None, seconds: float, cached: bool) -> None:
@@ -805,8 +790,7 @@ def fetch_all_apify(
                     ex.submit(
                         call_actor, key, filters,
                         token=token, owner=owner, cache_ttl=cache_ttl,
-                        run_timeout=run_timeout, anthropic_key=anthropic_key,
-                        mistral_key=mistral_key,
+                        run_timeout=run_timeout,
                         session=session, queries=dq,
                     ): (key, dq)
                     for key, dq in to_dispatch
@@ -1090,209 +1074,6 @@ def fetch_linkedin_apify(
     log.info("apify linkedin: %d combos → %d jobs (%d errors, %d cached)",
              len(combos), len(jobs), len(errors), cache_hits)
     return jobs, errors
-
-
-# ---------------------------------------------------------------------------
-# Per-user web_search via the published web-search-scraper actor (BYOK)
-# ---------------------------------------------------------------------------
-#
-# Apify analog of ``sources.web_search.fetch``. The actor runs a Claude
-# web-searching agent (BYOK — the caller's ANTHROPIC_API_KEY goes into the
-# actor input), so like the local adapter it is agentic and stateless: one
-# actor run per user cycle, no DB cursor. Seed mapping:
-#   keywords        ← search_seeds.web_search.seed_phrases (agent treats each
-#                     as a search hint; site:-operator phrases are fine — the
-#                     agent forms its own queries around them)
-#   userDescription ← focus_notes + the user's free-text prefs
-#   remote          ← filters["remote"] ("require" → "remote-only")
-
-WEB_SEARCH_ACTOR = "web-search-scraper"
-
-# Schema hard cap on the actor's maxItems.
-WEB_SEARCH_MAX_ITEMS = 30
-
-
-def _web_search_record_to_job(rec: dict) -> Job | None:
-    """Map one web-search-scraper record onto a ``Job``. ``external_id`` is
-    pinned to the URL (parity with the local web_search adapter's keying), so
-    seen/dedupe state survives a backend switch."""
-    if not isinstance(rec, dict):
-        return None
-    url = (rec.get("url") or rec.get("link") or "").strip()
-    title = (rec.get("title") or rec.get("jobTitle") or "").strip()
-    if not url and not title:
-        return None
-    return Job(
-        source="web_search",
-        external_id=url or title[:64],
-        title=title,
-        company=(rec.get("company") or "").strip(),
-        location=(rec.get("location") or "").strip(),
-        url=url,
-        posted_at=str(rec.get("postedAt") or rec.get("posted_at") or ""),
-        snippet=(rec.get("snippet") or rec.get("description") or "").strip(),
-        salary=str(rec.get("salary") or ""),
-    )
-
-
-def fetch_web_search_apify(
-    seeds: dict | None,
-    filters: dict,
-    *,
-    free_text: str | None = None,
-    token: str | None = None,
-    owner: str | None = None,
-    anthropic_key: str | None = None,
-    mistral_key: str | None = None,
-    cache_ttl: int = 0,
-    run_timeout: int | None = None,
-    attribution: dict | None = None,
-    db: Any = None,
-    result_cache_s: int = 0,
-) -> tuple[list[Job], list[str]]:
-    """Per-user web_search fetch via the ``web-search-scraper`` actor.
-
-    Returns ``(jobs, errors)`` like ``fetch_linkedin_apify``. BYOK: without
-    EITHER an Anthropic key or a Mistral key the fetch is SKIPPED with a
-    logged error string (parity with how ``BYOK_SOURCES`` are skipped in the
-    global fetch) — the caller treats it like any other per-source error.
-    Project preference is Mistral over Anthropic (see repo CLAUDE.md); the
-    actor accepts ``provider="mistral"`` + ``mistralApiKey`` and the bot's
-    own env carries ``MISTRAL_API_KEY`` (not an Anthropic key), so the
-    Mistral fallback is what actually lets this source run in practice.
-    ``attribution`` maps each job_id to the seed phrase list head, matching
-    the local adapter's query attribution granularity as closely as a
-    single agentic run allows.
-
-    ``db``/``result_cache_s`` (opt-in, same contract as ``fetch_all_apify``):
-    unlike LinkedIn's literal (query, geo), this actor is AGENTIC — its
-    ``userDescription`` (focus_notes + free text) steers what the Claude
-    agent searches for, so two users with different context can legitimately
-    get different results for the "same" keywords. The cache key folds in a
-    hash of that description, so a hit only replays for a near-identical
-    profile (in practice: the same user re-running soon, or two users who
-    happen to share both keywords and description) — safe by construction,
-    just a lower hit rate than LinkedIn's.
-    """
-    seeds = seeds if isinstance(seeds, dict) else {}
-    phrases = [p.strip() for p in (seeds.get("seed_phrases") or [])
-               if isinstance(p, str) and p.strip()]
-    if not phrases and not (free_text or "").strip():
-        return [], []
-
-    token = resolve_token(token)
-    if not token:
-        return [], ["web_search-apify: no APIFY_TOKEN (env APIFY_TOKEN)"]
-    anthropic_key = anthropic_key or (os.environ.get("ANTHROPIC_API_KEY") or "").strip() or None
-    mistral_key = mistral_key or (os.environ.get("MISTRAL_API_KEY") or "").strip() or None
-    if not anthropic_key and not mistral_key:
-        return [], ["web_search-apify: skipped (BYOK: no ANTHROPIC_API_KEY or MISTRAL_API_KEY)"]
-    owner = owner or DEFAULT_ACTOR_OWNER
-    timeout = int(run_timeout or filters.get("ai_web_search_timeout_s") or 240)
-
-    try:
-        max_items = min(int(filters.get("max_per_source") or 36), WEB_SEARCH_MAX_ITEMS)
-    except (TypeError, ValueError):
-        max_items = WEB_SEARCH_MAX_ITEMS
-
-    remote_pref = str(filters.get("remote") or "").lower()
-    desc_parts = [str(seeds.get("focus_notes") or "").strip(),
-                  (free_text or "").strip()]
-    user_desc = "\n".join(p for p in desc_parts if p)[:2000]
-
-    cache_query = (
-        "|".join(sorted(phrases[:12])) + "::" + remote_pref + "::"
-        + hashlib.sha1(user_desc.encode("utf-8")).hexdigest()[:12]
-    )
-    if db is not None and result_cache_s > 0:
-        cached = None
-        try:
-            cached = db.recent_fetch_jobs("web_search", cache_query, "", result_cache_s)
-        except Exception:
-            log.debug("apify web_search: cache lookup failed", exc_info=True)
-        if cached is not None:
-            jobs: list[Job] = []
-            seen_urls: set[str] = set()
-            attr_q = phrases[0] if phrases else "web_search"
-            for d in cached:
-                if not isinstance(d, dict):
-                    continue
-                try:
-                    j = Job(**{k: v for k, v in d.items() if k in _JOB_FIELDS})
-                except TypeError:
-                    continue
-                if j.url and j.url in seen_urls:
-                    continue
-                if j.url:
-                    seen_urls.add(j.url)
-                jobs.append(j)
-                if attribution is not None:
-                    try:
-                        attribution.setdefault(j.job_id, attr_q)
-                    except Exception:
-                        pass
-            log.info("apify web_search: %d records from cache", len(jobs))
-            return jobs, []
-
-    inp: dict[str, Any] = {
-        "keywords": phrases[:12],
-        "remote": "remote-only" if remote_pref in ("require", "remote") else "any",
-        "maxItems": max_items,
-        "cacheTtlSeconds": int(cache_ttl),
-    }
-    if anthropic_key:
-        inp["anthropicApiKey"] = anthropic_key
-    elif mistral_key:
-        inp["provider"] = "mistral"
-        inp["mistralApiKey"] = mistral_key
-    if user_desc:
-        inp["userDescription"] = user_desc
-
-    url = f"{API_BASE}/{owner}~{WEB_SEARCH_ACTOR}/run-sync-get-dataset-items"
-    params = {"token": token, "timeout": timeout, "maxItems": max_items}
-    started = time.time()
-    resp, err = _post_actor_run(
-        requests, url, params=params, payload=inp,
-        timeout=timeout + 30, label="web_search",
-    )
-    if err:
-        return [], [f"web_search-apify: {err}"]
-    try:
-        data = resp.json()
-    except Exception as e:
-        return [], [f"web_search-apify: {type(e).__name__}: {str(e)[:200]}"]
-
-    if not isinstance(data, list):
-        return [], ["web_search-apify: actor returned non-array body"]
-
-    jobs = []
-    seen_urls = set()
-    attr_q = phrases[0] if phrases else "web_search"
-    for rec in data:
-        j = _web_search_record_to_job(rec)
-        if j is None or (j.url and j.url in seen_urls):
-            continue
-        if j.url:
-            seen_urls.add(j.url)
-        jobs.append(j)
-        if attribution is not None:
-            try:
-                attribution.setdefault(j.job_id, attr_q)
-            except Exception:
-                pass
-    log.info("apify web_search: %d records in %.1fs", len(jobs), time.time() - started)
-    if db is not None and result_cache_s > 0:
-        try:
-            existing = db.count_existing_jobs([j.job_id for j in jobs])
-            db.record_fetch(
-                "web_search", cache_query, 0, "",
-                jobs_seen=len(jobs),
-                jobs_new=max(0, len(jobs) - existing),
-                jobs_json=json.dumps([asdict(j) for j in jobs]),
-            )
-        except Exception:
-            log.debug("apify web_search: cache write failed", exc_info=True)
-    return jobs, []
 
 
 # ---------------------------------------------------------------------------

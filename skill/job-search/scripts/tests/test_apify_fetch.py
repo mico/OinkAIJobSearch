@@ -6,11 +6,10 @@ canned actor datasets, so we assert the pure logic:
 
   1. ``record_to_job`` — field-fallback mapping (clean schema + un-careers
      legacy ``jobId``/``description``), and the drop rule (no url + no title).
-  2. ``build_input`` — broad parity input (maxItems + cacheTtlSeconds), BYOK
-     key injection.
+  2. ``build_input`` — broad parity input (maxItems + cacheTtlSeconds).
   3. ``enabled_apify_sources`` — enable-gate ∩ ACTOR_MAP.
-  4. ``fetch_all_apify`` — fan-out, (jobs, errors, meta) contract, BYOK skip
-     when no key, HTTP-error capture, and the ``only=`` subset filter.
+  4. ``fetch_all_apify`` — fan-out, local Codex routing, jobs/errors/meta,
+     HTTP-error capture, and the ``only=`` subset filter.
 
 Invoke directly or via pytest:
 
@@ -146,28 +145,12 @@ def test_clean_queries():
     assert len(af.clean_queries(many)) == af.MAX_ACTOR_QUERIES
 
 
-def test_build_input_byok_key_injected():
-    inp = af.build_input("devex", {"max_per_source": 10}, cache_ttl=5, anthropic_key="sk-x")
-    assert inp["anthropicApiKey"] == "sk-x"
-    # Non-BYOK never gets the key even if one is around.
-    inp2 = af.build_input("hackernews", {"max_per_source": 10}, cache_ttl=5, anthropic_key="sk-x")
-    assert "anthropicApiKey" not in inp2
-
-
-def test_build_input_byok_mistral_fallback():
-    # No anthropic key, but a mistral key is available (the project's actual
-    # runtime env — see .env's MISTRAL_API_KEY) — actor supports
-    # provider="mistral" + mistralApiKey, so we should wire that instead of
-    # leaving the BYOK source keyless.
-    inp = af.build_input("devex", {"max_per_source": 10}, cache_ttl=5, mistral_key="mk-x")
-    assert inp["provider"] == "mistral"
-    assert inp["mistralApiKey"] == "mk-x"
-    assert "anthropicApiKey" not in inp
-    # Anthropic wins if both are present.
-    inp2 = af.build_input("devex", {"max_per_source": 10}, cache_ttl=5,
-                           anthropic_key="sk-x", mistral_key="mk-x")
-    assert inp2["anthropicApiKey"] == "sk-x"
-    assert "provider" not in inp2 and "mistralApiKey" not in inp2
+def test_build_input_never_injects_provider_credentials(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")
+    monkeypatch.setenv("MISTRAL_API_KEY", "unused")
+    inp = af.build_input("hackernews", {"max_per_source": 10}, cache_ttl=5)
+    assert set(inp) == {"maxItems", "cacheTtlSeconds"}
+    assert "devex" not in af.ACTOR_MAP
 
 
 # ---------------------------------------------------------------------------
@@ -208,14 +191,68 @@ def test_fetch_all_apify_happy(monkeypatch):
     assert {m["source"] for m in meta} == {"hackernews", "wttj"}
 
 
-def test_fetch_all_apify_byok_skipped_without_key(monkeypatch):
-    _patch_session(monkeypatch, {"devex-scraper": _ok([{"title": "T", "url": "u"}])})
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-    filters = {"sources": {"devex": True}, "max_per_source": 5}
-    jobs, errors, meta = af.fetch_all_apify(filters, token="T", anthropic_key=None, mistral_key=None)
+def test_fetch_all_apify_ai_sources_run_locally_without_token(monkeypatch):
+    import sources.devex as devex
+    import sources.curated_boards as curated
+
+    monkeypatch.setattr(af, "resolve_token", lambda explicit=None: None)
+    calls = []
+    job = Job(source="devex", external_id="1", title="T", company="C",
+              location="", url="https://example.com/1", posted_at="", snippet="")
+
+    def fetch(filters, *, db=None):
+        calls.append((filters, db))
+        return [job, job]
+
+    monkeypatch.setattr(devex, "fetch", fetch)
+    monkeypatch.setattr(curated, "fetch", fetch)
+    filters = {"sources": {"devex": True, "remocate": True}}
+    marker = object()
+    jobs, errors, meta = af.fetch_all_apify(filters, db=marker)
+    assert jobs == [job] and errors == []
+    assert calls == [(filters, marker), (filters, marker)]
+    assert {row["source"] for row in meta} == {"devex", "curated_boards"}
+    assert all(row["backend"] == "codex" and row["actor"] is None
+               and row["skipped"] is None for row in meta)
+
+def test_fetch_all_apify_keeps_local_jobs_when_apify_token_missing(monkeypatch):
+    import sources.devex as devex
+
+    job = Job(source="devex", external_id="1", title="T", company="C",
+              location="", url="https://example.com/1", posted_at="", snippet="")
+    monkeypatch.setattr(devex, "fetch", lambda filters, *, db=None: [job])
+    monkeypatch.setattr(af, "resolve_token", lambda explicit=None: None)
+    jobs, errors, meta = af.fetch_all_apify(
+        {"sources": {"devex": True, "hackernews": True}})
+    assert jobs == [job]
+    assert len(errors) == 1 and "APIFY_TOKEN" in errors[0]
+    assert meta[0]["source"] == "devex"
+
+
+
+def test_fetch_all_apify_local_error_preserves_contract(monkeypatch):
+    import sources.devex as devex
+
+    def fail(filters, *, db=None):
+        raise RuntimeError("Codex unavailable")
+
+    monkeypatch.setattr(devex, "fetch", fail)
+    jobs, errors, meta = af.fetch_all_apify(
+        {"sources": {"devex": True}}, only=["devex"])
     assert jobs == []
-    assert any(m["source"] == "devex" and m["skipped"] for m in meta)
+    assert errors == ["devex: RuntimeError: Codex unavailable"]
+    assert meta[0]["error"] == "RuntimeError: Codex unavailable"
+
+
+def test_fetch_all_apify_only_excludes_local_sources(monkeypatch):
+    import sources.devex as devex
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("excluded source ran")
+
+    monkeypatch.setattr(devex, "fetch", unexpected)
+    assert af.fetch_all_apify(
+        {"sources": {"devex": True}}, only=["hackernews"]) == ([], [], [])
 
 
 def test_fetch_all_apify_http_error_captured(monkeypatch):
@@ -427,55 +464,6 @@ def test_fetch_all_apify_single_keyword_gated_off(monkeypatch):
     assert "keyword" not in sess.calls[0]["json"]
     assert "queries" not in meta[0]
 
-
-# ---------------------------------------------------------------------------
-# fetch_web_search_apify
-# ---------------------------------------------------------------------------
-
-_WS_SEEDS = {"seed_phrases": ["react remote europe", "site:greenhouse.io react"],
-             "focus_notes": "Prefer EU remote."}
-
-
-def test_web_search_apify_byok_skip(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-    jobs, errs = af.fetch_web_search_apify(_WS_SEEDS, {}, token="T", anthropic_key=None, mistral_key=None)
-    assert jobs == [] and errs and "BYOK" in errs[0]
-
-
-def test_web_search_apify_no_seeds_no_text():
-    jobs, errs = af.fetch_web_search_apify({}, {}, token="T", anthropic_key="sk-x")
-    assert jobs == [] and errs == []
-
-
-def test_web_search_apify_happy(monkeypatch):
-    calls = []
-
-    def fake_post(url, params=None, json=None, timeout=None):
-        calls.append({"url": url, "params": params, "json": json})
-        return _FakeResp([
-            {"title": "React Dev", "company": "Acme", "url": "https://a/1"},
-            {"title": "React Dev dup", "url": "https://a/1"},   # url dupe dropped
-        ])
-
-    monkeypatch.setattr(af.requests, "post", fake_post)
-    attribution = {}
-    jobs, errs = af.fetch_web_search_apify(
-        _WS_SEEDS, {"remote": "require", "max_per_source": 36},
-        free_text="senior roles only", token="T", anthropic_key="sk-x",
-        attribution=attribution,
-    )
-    assert errs == [] and len(jobs) == 1
-    j = jobs[0]
-    assert j.source == "web_search" and j.external_id == "https://a/1"
-    inp = calls[0]["json"]
-    assert inp["anthropicApiKey"] == "sk-x"
-    assert inp["keywords"] == _WS_SEEDS["seed_phrases"]
-    assert inp["remote"] == "remote-only"
-    assert inp["maxItems"] == af.WEB_SEARCH_MAX_ITEMS  # 36 capped to schema max
-    assert "Prefer EU remote." in inp["userDescription"]
-    assert "senior roles only" in inp["userDescription"]
-    assert attribution[j.job_id] == "react remote europe"
 
 
 def test_fetch_all_apify_no_token(monkeypatch):

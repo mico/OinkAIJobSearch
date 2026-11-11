@@ -2,7 +2,7 @@
 """Audit → operator-reviewed patch proposer.
 
 Offline post-hoc tool. Reads `scoring_audit.review` forensic entries from
-recent days, clusters the disagreements with Opus, and for each cluster
+recent days, clusters the disagreements with Codex, and for each cluster
 proposes a unified-diff patch against the SCORING prompt
 (`_PROMPT` in `skill/job-search/scripts/job_enrich.py`) plus an
 operator briefing in markdown. Writes everything under
@@ -20,20 +20,20 @@ DESIGN PRINCIPLES
    — the operator decides if/when to apply them.
 
 2. Prefer AI over heuristics (CLAUDE.md). Cluster detection is done by
-   Opus over the raw disagreement list — there are NO hard-coded regex
+   Codex over the raw disagreement list — there are NO hard-coded regex
    matchers over "language" / "seniority" / etc. The per-cluster patch
-   proposal is also Opus-generated, with explicit instructions to teach
+   proposal is also Codex-generated, with explicit instructions to teach
    the scorer via prompt rules, not via Python.
 
 3. Daily digest never depends on this stage. The pipeline in
    `search_jobs.py` is unchanged. This script is operator-invoked or
-   driven from a separate cron entry; if Opus is unreachable, or any
+   driven from a separate cron entry; if Codex is unreachable, or any
    cluster fails to parse, the script logs and exits 0 — never a
    non-zero return that a cron wrapper would propagate as failure.
 
 4. Prompt-injection hygiene. Disagreement comments include text
    (titles, scorer comments) that earlier model calls produced; before
-   we hand any of that back to Opus we wrap it in an opaque-data block
+   we hand any of that back to Codex we wrap it in an opaque-data block
    with an instruction-ignore preamble, mirroring the pattern in
    `safety_check.py` / `market_research_*` prompts.
 
@@ -59,7 +59,7 @@ Run weekly, NOT inline with the daily digest. Cron entry (Mondays at
         /usr/bin/python3 skill/job-search/scripts/tools/audit_patch_synthesize.py \\
         >> bot.log 2>&1
 
-The script swallows its own errors (returns 0 on every Opus / parse
+The script swallows its own errors (returns 0 on every Codex / parse
 failure path) — only `--lookback-days 0` style operator misuse or a
 missing forensic log directory will produce a non-zero exit.
 """
@@ -86,7 +86,7 @@ _SCRIPTS_DIR = _HERE.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from claude_cli import (  # noqa: E402
+from codex_cli import (  # noqa: E402
     run_p as _real_run_p,
     extract_assistant_text,
     parse_json_block,
@@ -102,15 +102,15 @@ log = logging.getLogger(__name__)
 # Defaults — overridable via CLI flags or env.
 DEFAULT_LOOKBACK_DAYS = 14
 DEFAULT_MIN_CLUSTER_SIZE = 5
-DEFAULT_OPUS_MODEL = os.environ.get("AUDIT_PATCH_MODEL", "opus")
+DEFAULT_MODEL = os.environ.get("OINK_CODEX_MODEL") or None
 DEFAULT_TIMEOUT_S = int(os.environ.get("AUDIT_PATCH_TIMEOUT_S", "300"))
 
-# Cap on how many disagreements we feed Opus in one clustering call.
+# Cap on how many disagreements we feed Codex in one clustering call.
 # Past this, we sample (deterministically: the most-recent N) so the
 # prompt stays comfortably inside the context window.
 _MAX_DISAGREEMENTS_FOR_CLUSTERING = 200
 
-# Sample examples per cluster handed to the patch-proposer Opus call.
+# Sample examples per cluster handed to the patch-proposer Codex call.
 _EXAMPLES_PER_CLUSTER = 5
 
 
@@ -135,10 +135,10 @@ def _default_job_enrich_path() -> Path:
 # Indirection so tests can monkeypatch the CLI without touching the real
 # binary. Callers should use `run_p(...)` not `_real_run_p(...)`.
 def run_p(prompt: str, *, model: str | None = None, timeout_s: int = DEFAULT_TIMEOUT_S) -> str | None:
-    """Thin wrapper around `claude_cli.run_p` so tests can replace it.
+    """Thin wrapper around `codex_cli.run_p` so tests can replace it.
 
     Tests monkey-patch `audit_patch_synthesize.run_p` to inject canned
-    Opus responses. Real callers get the unchanged subprocess invocation.
+    Codex responses. Real callers get the unchanged subprocess invocation.
     """
     return _real_run_p(prompt, model=model, timeout_s=timeout_s)
 
@@ -163,7 +163,7 @@ class Disagreement:
     comment: str
 
     def to_summary_dict(self) -> dict[str, Any]:
-        """Compact form handed to Opus for clustering + per-cluster examples."""
+        """Compact form handed to Codex for clustering + per-cluster examples."""
         return {
             "id": self.external_id,
             "title": self.title,
@@ -314,12 +314,12 @@ def _wrap_opaque(payload: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Clustering call (Opus, JSON-only output)
+# Clustering call (Codex, JSON-only output)
 # ---------------------------------------------------------------------------
 
 _CLUSTER_PROMPT = """You are a SCORING-RULES PATTERN ANALYST for an automated
-job-match bot. The bot's scorer (Sonnet) grades postings against a candidate;
-a separate auditor (Opus) re-grades and disagrees on some of them. You are
+job-match bot. The bot's scorer (Codex) grades postings against a candidate;
+a separate auditor (Codex) re-grades and disagrees on some of them. You are
 reading those disagreements and looking for PATTERNS the scorer keeps
 getting wrong.
 
@@ -377,11 +377,11 @@ Rules:
 def cluster_disagreements(
     disagreements: list[Disagreement],
     *,
-    model: str = DEFAULT_OPUS_MODEL,
+    model: str = DEFAULT_MODEL,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     run_p_fn: Callable[..., str | None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Ask Opus to cluster disagreements. Returns a list of cluster dicts.
+    """Ask Codex to cluster disagreements. Returns a list of cluster dicts.
 
     Returns [] on any failure (CLI missing, malformed JSON, etc.). Never
     raises.
@@ -446,7 +446,7 @@ def cluster_disagreements(
 
 
 # ---------------------------------------------------------------------------
-# Per-cluster patch proposal (Opus, unified-diff output)
+# Per-cluster patch proposal (Codex, unified-diff output)
 # ---------------------------------------------------------------------------
 
 _PATCH_PROMPT = """You are a PROMPT-ENGINEERING ASSISTANT for an automated
@@ -513,11 +513,11 @@ def propose_patch(
     examples: list[Disagreement],
     prompt_body: str,
     *,
-    model: str = DEFAULT_OPUS_MODEL,
+    model: str = DEFAULT_MODEL,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     run_p_fn: Callable[..., str | None] | None = None,
 ) -> str | None:
-    """Ask Opus for one unified-diff hunk. Returns the diff text or None.
+    """Ask Codex for one unified-diff hunk. Returns the diff text or None.
 
     Returns None on CLI failure / empty output / unparseable diff.
     """
@@ -934,7 +934,7 @@ def synthesize(
     forensic_dir: Path | None = None,
     output_root: Path | None = None,
     job_enrich_path: Path | None = None,
-    model: str = DEFAULT_OPUS_MODEL,
+    model: str = DEFAULT_MODEL,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     notify: bool = True,
     now: float | None = None,
@@ -1144,8 +1144,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Override forensic log directory.")
     ap.add_argument("--output-root", type=Path, default=None,
                     help="Override state/audit_patches/ root.")
-    ap.add_argument("--model", default=DEFAULT_OPUS_MODEL,
-                    help="Claude model name (default: opus).")
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="Codex model name (default: OINK_CODEX_MODEL or CLI default).")
     ap.add_argument("--timeout-s", type=int, default=DEFAULT_TIMEOUT_S,
                     help="Per-CLI-call timeout in seconds.")
     ap.add_argument("-v", "--verbose", action="store_true")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline smoke test for the /marketresearch bot plumbing.
 
-Covers every seam that does NOT need the real `claude` CLI, real Telegram,
+Covers every seam that does NOT need the real `codex` CLI, real Telegram,
 or real network I/O. Focus:
 
   1. DB schema — research_runs table exists with expected columns.
@@ -20,7 +20,7 @@ or real network I/O. Focus:
      payload clears the state and produces a rejection message.
  10. CLEAN_DATA_KINDS exposes a "research" entry with our expected code.
 
-No Telegram, no network, no Claude CLI. Exits non-zero on any failure.
+No Telegram, no network, no Codex CLI. Exits non-zero on any failure.
 """
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ with tempfile.TemporaryDirectory() as td:
         chat_id=42,
         status="partial",
         location_used="Berlin, DE",
-        model="claude-opus-4",
+        model="codex-configured-model-4",
         elapsed_ms=123456,
         workers_ok=workers_ok,
         workers_failed=workers_failed,
@@ -198,7 +198,7 @@ with tempfile.TemporaryDirectory() as td:
     if row is not None:
         check(row["status"] == "partial", f"status=partial (got {row['status']!r})")
         check(row["location_used"] == "Berlin, DE", "location_used roundtrip")
-        check(row["model"] == "claude-opus-4", "model roundtrip")
+        check(row["model"] == "codex-configured-model-4", "model roundtrip")
         check(row["elapsed_ms"] == 123456, "elapsed_ms roundtrip")
         check(row["docx_path"] == "/tmp/report.docx", "docx_path roundtrip")
         check(row["resume_sha1"] == "deadbeef", "resume_sha1 roundtrip")

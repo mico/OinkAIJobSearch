@@ -5,16 +5,14 @@ legitimately (or accidentally) mutate:
 
   * ``instrumentation.wrappers._resolve_store`` / ``._DEFAULT_STORE`` — the
     lazy telemetry-store resolver + its cached default store.
-  * ``sdk_scoring._CLIENT`` — the cached Anthropic SDK client.
 
 At least one existing test (``test_listing_verifier_hardening.py``)
 OVERWRITES ``wrappers._resolve_store`` with a capture stub via direct
 module assignment and never restores it — by design, to dodge the
 stale-reference problem the ``from instrumentation.wrappers import ...``
 pattern would create. On its own that is harmless, but it LEAKS into any
-later test whose telemetry path calls ``_resolve_store`` (e.g. the
-SDK-scoring telemetry tests), silently routing their ``record_claude_call``
-rows into the stub instead of the test's own store.
+later test whose telemetry path calls ``_resolve_store``, silently routing
+its ``record_claude_call`` rows into the stub instead of the test's store.
 
 This autouse fixture snapshots those globals before each test and restores
 them afterwards, so no test can pollute another regardless of collection
@@ -31,7 +29,7 @@ def _hiring_contact_off_by_default(monkeypatch):
     """Disable the send-time hiring-contact pass for every test by default.
 
     ``send_per_job_digest`` runs an LLM + web-search lookup per alive job;
-    on a machine with the ``claude`` CLI installed that would spawn real
+    on a machine with the ``codex`` CLI installed that would spawn real
     subprocesses from any test that exercises the send path. The flag is
     read per call (not at import), so feature tests re-enable it with
     ``monkeypatch.setenv("HIRING_CONTACT_OFF", "0")`` in their body.
@@ -51,12 +49,6 @@ def _restore_module_globals():
         saved_resolve = _w.__dict__.get("_resolve_store")
         saved_default = _w.__dict__.get("_DEFAULT_STORE")
 
-    try:
-        import sdk_scoring as _s
-    except Exception:
-        _s = None
-    if _s is not None:
-        saved_client = _s.__dict__.get("_CLIENT")
 
     yield
 
@@ -65,5 +57,3 @@ def _restore_module_globals():
         if saved_resolve is not None:
             _w._resolve_store = saved_resolve
         _w._DEFAULT_STORE = saved_default
-    if _s is not None:
-        _s._CLIENT = saved_client

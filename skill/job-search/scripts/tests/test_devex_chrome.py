@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chrome-agent fallback wiring for the DevEx adapter (task #13).
 
-The DevEx adapter's PRIMARY path is the WORKING Claude WebSearch/WebFetch
+The DevEx adapter's PRIMARY path is Codex native web search
 delegation. DevEx is DataDome-walled, so on a bad run that path returns ZERO
 jobs. This test pins the contract for the new last-resort Chrome-agent tier:
 
@@ -16,7 +16,7 @@ jobs. This test pins the contract for the new last-resort Chrome-agent tier:
   * With the gate OFF (the real default), the real helper returns [] with NO
     subprocess, so the adapter's observable behavior is identical to today.
 
-NO real `claude -p`, NO network: the Claude CLI wrapper is stubbed to canned
+NO real Codex or network: the shared Codex wrapper is stubbed to canned
 JSON, the chrome helper is stubbed at the module it's imported from, and the
 detail-page enrichment is suppressed.
 """
@@ -40,14 +40,14 @@ from sources import devex  # noqa: E402
 # --------------------------------------------------------------------------
 
 def _envelope(jobs: list[dict]) -> str:
-    """Wrap a jobs list in the claude-CLI --output-format json envelope."""
+    """Wrap a jobs list in the shared Codex result envelope."""
     return json.dumps({"result": json.dumps({"jobs": jobs})})
 
 
 def _patch_primary(monkeypatch, jobs: list[dict]) -> None:
     """Stub the WebSearch/WebFetch delegation to return canned JSON."""
     monkeypatch.setattr(
-        devex, "_run_claude",
+        devex, "_run_codex",
         lambda prompt, *, timeout_s: _envelope(jobs),
         raising=True,
     )
@@ -67,7 +67,7 @@ def _stub_chrome(monkeypatch, returns):
     import chrome_agent_fetch
     calls: list[dict] = []
 
-    def _fake(*, url, instruction, max_items=20, timeout_s=None, device_id=None):
+    def _fake(*, url, instruction, max_items=20, timeout_s=None):
         calls.append({
             "url": url, "instruction": instruction, "max_items": max_items,
         })
@@ -192,12 +192,12 @@ def test_fallback_does_not_fire_when_primary_nonempty(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Gate OFF (the real default) → identical to today, no subprocess
+# Gate OFF (the real default) → identical to today, no desktop attachment
 # --------------------------------------------------------------------------
 
 def test_gate_off_real_helper_returns_empty_no_regression(monkeypatch):
     """With chrome_agent_fallback_enabled False (the DEFAULT) the REAL helper
-    short-circuits to [] with NO subprocess, so an empty primary path yields
+    short-circuits to [] with NO desktop attachment, so an empty primary path yields
     an empty result — identical to today's behavior."""
     _patch_primary(monkeypatch, jobs=[])  # primary returns ZERO jobs
     _suppress_detail_fetch(monkeypatch)
@@ -206,12 +206,12 @@ def test_gate_off_real_helper_returns_empty_no_regression(monkeypatch):
     # Force the gate OFF explicitly (independent of the live default value).
     monkeypatch.setattr(
         chrome_agent_fetch, "_chrome_agent_config",
-        lambda: (False, None, 240), raising=True,
+        lambda: (False, "http://127.0.0.1:9222", 240), raising=True,
     )
-    # Guard: the CLI runner must NEVER be spawned when the gate is off.
+    # Guard: the desktop reader must NEVER be reached when the gate is off.
     def _boom(*a, **k):
-        raise AssertionError("subprocess must not spawn when gate is OFF")
-    monkeypatch.setattr(chrome_agent_fetch, "_run_chrome_agent", _boom,
+        raise AssertionError("desktop browser must not attach when gate is OFF")
+    monkeypatch.setattr(chrome_agent_fetch, "_read_desktop_page", _boom,
                         raising=True)
 
     out = devex.fetch({"max_per_source": 36, "ai_scrape_timeout_s": 30}, db=None)
@@ -227,7 +227,7 @@ def test_fallback_helper_raising_is_swallowed(monkeypatch):
 
     import chrome_agent_fetch
 
-    def _raise(*, url, instruction, max_items=20, timeout_s=None, device_id=None):
+    def _raise(*, url, instruction, max_items=20, timeout_s=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(chrome_agent_fetch, "fetch_listings_via_chrome",

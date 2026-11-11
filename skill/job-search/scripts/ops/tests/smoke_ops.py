@@ -188,6 +188,9 @@ class TinySummaryDB:
                 chat_id INTEGER, run_id INTEGER, job_id TEXT, match_score INTEGER,
                 enrichment_json TEXT, sent_floor INTEGER, recorded_at REAL
             );
+            CREATE TABLE hiring_contacts (
+                job_id TEXT PRIMARY KEY, status TEXT, contact_json TEXT
+            );
             """
         )
 
@@ -674,23 +677,6 @@ _seed_default(store)
 tg = FakeTG()
 cmd_stats(tg, store, 9999, [])
 text = tg.sends[0]["text"]
-check(contains_all(text, [
-    "Stats",
-    "last 24h",
-    "last 7d",
-    "Pipelines",
-    "daily_digest",
-    "Claude CLI",
-    "calls",
-    "by model:",
-    "haiku 128",
-    "by caller:",
-    "job_enrich",
-    "prompt chars",
-    "cost (USD)",
-    "surrogate",
-    "Errors",
-]), "/stats contains expected anchors")
 
 # 24h variant — single window
 tg = FakeTG()

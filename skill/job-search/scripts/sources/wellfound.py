@@ -56,8 +56,8 @@ Option (a) above — drive a REAL browser that has already solved the
 DataDome JS challenge — is now wired through the shared
 ``chrome_agent_fetch`` helper. When the operator enables
 ``chrome_agent_fallback_enabled`` in ``defaults.py`` the adapter asks the
-operator's desktop Chrome (via ``claude -p --chrome`` + the
-``claude-in-chrome`` MCP) to load ``/remote`` and extract the listing
+operator's desktop Chrome via local Playwright CDP to load ``/remote``;
+tool-free Codex then extracts the rendered listing
 cards. With the flag OFF (the DEFAULT) the helper returns ``[]`` WITHOUT
 spawning anything, so this adapter's observable behavior is byte-for-byte
 identical to the historic DataDome stub — it still probes, logs the block

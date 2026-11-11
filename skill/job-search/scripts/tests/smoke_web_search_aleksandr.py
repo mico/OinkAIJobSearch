@@ -123,7 +123,7 @@ def main() -> int:
     if len(jobs) == 0:
         print("[smoke] FAIL: 0 jobs — the bug may still be present.", file=sys.stderr)
         print("[smoke] Inspect state/forensic_logs/log.0.jsonl for the latest "
-              "claude_cli.run_p_with_tools entry; look for permission_denials.",
+              "codex_cli.run_p_with_tools entry; look for permission_denials.",
               file=sys.stderr)
         return 1
 

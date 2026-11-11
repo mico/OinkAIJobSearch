@@ -29,7 +29,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from claude_cli import run_p, extract_assistant_text, parse_json_block
+from codex_cli import extract_assistant_text, parse_json_block
 from instrumentation.wrappers import wrapped_run_p
 import forensic
 
@@ -162,7 +162,7 @@ def build_fit_analysis_ai(
     job: dict,
     timeout_s: int = 180,
 ) -> dict | None:
-    """Ask the `claude` CLI for a structured fit analysis of resume vs. JD.
+    """Ask the `codex` CLI for a structured fit analysis of resume vs. JD.
 
     Returns the normalized dict on success, or None on any failure (CLI
     missing, timeout, non-JSON response, validation failure). Callers

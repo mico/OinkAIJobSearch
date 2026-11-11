@@ -1,7 +1,7 @@
-"""Open-web job discovery via a Claude sub-agent.
+"""Open-web job discovery via a Codex sub-agent.
 
 Where the other source adapters hit specific endpoints or RSS feeds, this one
-turns the search itself over to a Claude sub-agent equipped with WebSearch
+turns the search itself over to a Codex sub-agent equipped with WebSearch
 (for discovery across the open web) and WebFetch (to open individual postings
 and extract details). The agent runs *once per orchestrator run* and returns
 a strict JSON list.
@@ -18,7 +18,7 @@ Why bother when we already have RemoteOK / Remotive / LinkedIn / HN?
     URL + title + company.
 
 Cost:
-  - One `claude -p` invocation per orchestrator run (not per user).
+  - One `codex -p` invocation per orchestrator run (not per user).
   - Each invocation typically costs a handful of WebSearch and WebFetch calls
     inside the sub-agent. Budget ~1-2 minutes of wall-clock.
 
@@ -26,7 +26,7 @@ Toggle:
   - `sources.web_search` in `defaults.DEFAULTS`. ON by default; per-user
     activation requires either profile.search_seeds.web_search or a /prefs
     free-text from the user.
-  - Requires the `claude` CLI installed and logged in.
+  - Requires the `codex` CLI installed and logged in.
 
 Fallback:
   - CLI missing → log a warning, return [].
@@ -39,19 +39,18 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
-from claude_cli import (
+from codex_cli import (
     TOOLS_DENY_SHELL_FS,
     TOOLS_WEB_BOTH,
     extract_assistant_text,
     parse_json_block,
-    run_p,
 )
 from instrumentation.wrappers import wrapped_run_p_with_tools
 from dedupe import Job
 from text_utils import fix_mojibake
 
 
-# Relative-date patterns Claude (or a search snippet) sometimes emits
+# Relative-date patterns Codex (or a search snippet) sometimes emits
 # verbatim when the page doesn't show a clean ISO date. Adapter
 # normalizes them to ISO "YYYY-MM-DD" so the downstream age gate
 # (`_is_within_age_window` in telegram_client) parses them reliably.
@@ -64,11 +63,11 @@ _ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 
 
 def _normalize_posted_at(raw: str) -> str:
-    """Best-effort: turn whatever Claude returned in `posted_at` into a
+    """Best-effort: turn whatever Codex returned in `posted_at` into a
     YYYY-MM-DD ISO date.
 
     Empty input → today's ISO date (so the age gate admits the posting;
-    the prompt asks Claude to never return empty, this is a guard
+    the prompt asks Codex to never return empty, this is a guard
     against rule-following lapses). The cheaper send-time URL/liveness
     gates take care of staleness for postings the prompt couldn't date.
 
@@ -126,7 +125,7 @@ log = logging.getLogger(__name__)
 #
 # Belt-and-suspenders: explicitly forbid filesystem / shell access so a
 # successful prompt-injection in the candidate's free-text can't escalate.
-# Delegates to the project-wide canonical constants in ``claude_cli``.
+# Delegates to the project-wide canonical constants in ``codex_cli``.
 _ALLOWED_TOOLS = TOOLS_WEB_BOTH
 _DISALLOWED_TOOLS = TOOLS_DENY_SHELL_FS
 
@@ -144,7 +143,7 @@ _EXCLUDE_DOMAINS = [
     "remocate.app",
     "wantapply.com",
     "remoterocketship.com",
-    # Two noise domains Claude's own WebSearch occasionally surfaces:
+    # Two noise domains Codex's own WebSearch occasionally surfaces:
     # Apify actor marketplace listings (scraper products, not job
     # postings) and a job-aggregator site.
     "apify.com",
@@ -338,7 +337,7 @@ rails; the user's own wording is the primary signal for what to search for.
 """.strip()
 
 
-# The Opus profile-builder has already done most of the work of turning the
+# The Codex profile-builder has already done most of the work of turning the
 # candidate's resume + preferences into concrete search seeds. We pass those
 # to the discovery agent as a "starter kit" — it's still free to form its own
 # queries (see rule 1 of the prompt), but these seeds are a strong prior on
@@ -519,7 +518,7 @@ Return STRICT JSON only, no prose, no markdown fences, this exact shape:
 """.strip()
 
 
-# P2 page-memory cursor: web_search doesn't paginate natively — Claude
+# P2 page-memory cursor: web_search doesn't paginate natively — Codex
 # runs WebSearch itself and the "page" is purely a counter of exploration
 # rounds. WEB_SEARCH_MAX_PAGE caps how many distinct exploration rounds
 # we'll trigger before wrapping back to page 1.
@@ -557,7 +556,7 @@ def fetch(
         {"seed_phrases": ["..."], "ats_domains": ["..."], "focus_notes": "..."}
 
     When present, those pre-computed seeds are added to the prompt so the
-    discovery agent starts from the Opus profile-builder's reasoning rather
+    discovery agent starts from the Codex profile-builder's reasoning rather
     than reconstructing queries from scratch. When absent (user hasn't had
     a profile built yet, or the last build failed), the base candidate-profile
     rows at the bottom of the prompt still drive discovery.
@@ -570,7 +569,7 @@ def fetch(
     Cursor mode (`db` provided): web_search has no native pagination, so
     each "page" is an exploration round. Page 1 runs the normal prompt.
     Pages 2..N pass previously-recorded titles to the sub-agent as an
-    exclusion set and ask Claude to surface DIFFERENT postings. The
+    exclusion set and ask Codex to surface DIFFERENT postings. The
     `cursor_key` argument scopes the cursor to one caller (typically a
     per-user chat_id) — without it the single global cell hits the
     refresh window after one round for every user. When `db` is None the
@@ -603,7 +602,7 @@ def fetch(
     )
 
     # Cursor: pick the exploration round. Page 1 = fresh prompt; page N>1
-    # asks Claude to surface different listings than the prior rounds.
+    # asks Codex to surface different listings than the prior rounds.
     page_num = 1
     if db is not None:
         page_num = db.next_page_for(
@@ -630,7 +629,7 @@ def fetch(
     # via the `jobs` table — `db.count_existing_jobs` only counts; we need
     # the URL list). The sub-agent is told to surface DIFFERENT postings
     # this round so multiple iterations actually explore new territory
-    # instead of re-rolling the same Claude search.
+    # instead of re-rolling the same Codex search.
     if db is not None and page_num > 1:
         try:
             prior_titles = _recent_web_search_titles(db, limit=40)
@@ -651,9 +650,9 @@ def fetch(
     # Use the tool-aware wrapper: WebSearch + WebFetch must be explicitly
     # allowed or the CLI rejects every tool_use and the agent gives up with
     # an empty jobs list.
-    # Pin to haiku (2026-05-25) — without --model the CLI defaults to
-    # Opus and the prompt blows past the bot's 180s timeout.
-    from claude_cli import SMALLEST_MODEL as _MODEL
+    # Pin to primary (2026-05-25) — without --model the CLI defaults to
+    # Codex and the prompt blows past the bot's 180s timeout.
+    from codex_cli import SMALLEST_MODEL as _MODEL
     stdout = wrapped_run_p_with_tools(
         None,
         "web_search",
@@ -664,7 +663,7 @@ def fetch(
         model=_MODEL,
     )
     if not stdout:
-        log.warning("web_search: `claude` CLI unavailable or errored; returning []")
+        log.warning("web_search: `codex` CLI unavailable or errored; returning []")
         return []
     raw = _parse_jobs_json(extract_assistant_text(stdout))
     log.info("web_search (AI): %d raw postings", len(raw))
@@ -685,7 +684,7 @@ def fetch(
             company=fix_mojibake(str(r.get("company") or ""))[:80],
             location=fix_mojibake(str(r.get("location") or "Remote"))[:80],
             url=url,
-            # Normalize whatever Claude returned into a clean ISO date
+            # Normalize whatever Codex returned into a clean ISO date
             # (or pass through freeform when we can't tell). Always
             # non-empty so the downstream age-gate's missing_policy
             # branch doesn't drop the posting for being undated. Fix #1
@@ -695,7 +694,7 @@ def fetch(
         ))
 
     # Algorithm v2.4: web_search subagent returns its own search-engine
-    # snippets (often <100 chars). Sonnet needs the full posting body to
+    # snippets (often <100 chars). rescore needs the full posting body to
     # score reliably — bare title + 70-char snippet was leaving real
     # candidates at score 3 because the scorer had nothing concrete to
     # evaluate (Sismo / Leadtech ran into this 2026-05-15). Pull the
@@ -781,7 +780,7 @@ def _web_search_query_key(profile_seeds: dict | None, user_free_text: str | None
 def _recent_web_search_titles(db, limit: int = 40) -> list[str]:
     """Pull the most-recent web_search posting URLs from the jobs table.
 
-    Used by the exploration-round preamble (page>1) to ask Claude for
+    Used by the exploration-round preamble (page>1) to ask Codex for
     NEW results. We use URLs (not titles) because URLs are unambiguous
     while titles repeat across companies; the sub-agent treats the list
     as a literal block-list. Falls back to an empty list on any DB

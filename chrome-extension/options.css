@@ -1,0 +1,46 @@
+:root {
+  color-scheme: light dark;
+  font: 15px/1.5 system-ui, -apple-system, sans-serif;
+  --border: #b5b9c2;
+  --muted: #555e6d;
+  --accent: #235cad;
+}
+body { margin: 0; background: #f3f5f8; color: #17202c; }
+main { max-width: 800px; margin: 36px auto; padding: 0 20px 40px; }
+h1 { font-size: 1.8rem; margin-bottom: 8px; }
+h2 { font-size: 1.25rem; margin-top: 0; }
+h3 { font-size: 1.05rem; margin: 0 0 8px; }
+section { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 22px; margin-top: 22px; }
+p { overflow-wrap: anywhere; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; }
+dt { font-weight: 600; }
+dd { margin: 0; overflow-wrap: anywhere; }
+code { font-size: 0.9em; overflow-wrap: anywhere; }
+label:not(.checkbox) { display: block; font-weight: 600; margin-top: 16px; }
+input[type="password"] { box-sizing: border-box; width: 100%; }
+input[type="password"], input[type="number"] { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; }
+input[type="number"] { width: 105px; }
+.checkbox { display: flex; align-items: start; gap: 9px; margin: 14px 0; }
+.checkbox input { margin-top: 5px; }
+.hint { color: var(--muted); font-size: 0.9rem; }
+.actions { display: flex; gap: 12px; margin-top: 22px; }
+button { font: inherit; cursor: pointer; padding: 8px 14px; border: 1px solid var(--border); border-radius: 5px; }
+button[type="submit"] { background: var(--accent); color: white; border-color: var(--accent); }
+button:disabled { cursor: default; opacity: 0.55; }
+button:focus-visible, input:focus-visible { outline: 3px solid #d99419; outline-offset: 2px; }
+article { border-top: 1px solid var(--border); padding: 16px 0; }
+article p { margin: 8px 0; }
+#feedback { min-height: 1.5em; margin-bottom: 0; }
+.error { color: #b11f2b; }
+@media (prefers-color-scheme: dark) {
+  :root { --border: #566071; --muted: #adb6c5; --accent: #225b9e; }
+  body { background: #15191f; color: #edf0f6; }
+  section { background: #202630; }
+  .error { color: #ffacb4; }
+}
+@media (max-width: 560px) {
+  main { margin-top: 20px; padding-inline: 12px; }
+  section { padding: 16px; }
+  dl { display: block; }
+  dd { margin-bottom: 12px; }
+}

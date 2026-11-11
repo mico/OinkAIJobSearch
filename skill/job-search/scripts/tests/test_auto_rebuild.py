@@ -3,7 +3,7 @@
 `_maybe_auto_rebuild_profile` watches `users.skip_events_since_rebuild`
 and kicks off `profile_builder.rebuild_profile` once the counter
 crosses the configured threshold. Tests drive the FSM without burning
-real Opus calls — `rebuild_profile` is injected via `_trigger_rebuild`.
+real Codex calls — `rebuild_profile` is injected via `_trigger_rebuild`.
 
 DB-layer coverage of the counter (`append_skip_note` bumping it,
 `reset_skip_events_since_rebuild` zeroing it, `get_…` reading it) is

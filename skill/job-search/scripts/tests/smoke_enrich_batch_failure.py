@@ -2,7 +2,7 @@
 """Smoke test for `enrich_jobs_ai` batch-failure handling.
 
 Reproduces the bug seen in pipeline_run #12: one of N batches returned an
-empty result from Claude, the verdicts for those 25 jobs were silently
+empty result from Codex, the verdicts for those 25 jobs were silently
 dropped, and the per-user "enriched X/Y" log line under-reported the loss
 without flagging it as a failure.
 
@@ -71,7 +71,7 @@ class _FakeJob:
 
 
 def _make_jobs(n: int) -> list[_FakeJob]:
-    return [_FakeJob(external_id=f"ext-{i:04d}") for i in range(n)]
+    return [_FakeJob(external_id=f"ext-{i:04d}", url=f"https://example.com/job/ext-{i:04d}") for i in range(n)]
 
 
 def _build_fake_response(chunk: list[_FakeJob]) -> str:
@@ -189,7 +189,7 @@ def test_one_batch_fails_others_succeed() -> None:
             prefs_text="MLOps engineer prefs",
             # Single-pass: this test asserts batch-failure handling, not the
             # two-pass merge — leaving two_pass on inflates primary-batch
-            # counts with the Sonnet pass and breaks the assertion below.
+            # counts with the rescore pass and breaks the assertion below.
             two_pass=False, max_jobs_per_call=25,
         )
     finally:
@@ -321,7 +321,7 @@ def test_split_retry_recovers() -> None:
         timeout_s=60,
         prefs_text="MLOps engineer prefs",
         # Single-pass: this test counts CLI invocations to verify split-retry
-        # behavior; two-pass would double them with a Sonnet pass.
+        # behavior; two-pass would double them with a rescore pass.
         two_pass=False, max_jobs_per_call=25,
     )
 

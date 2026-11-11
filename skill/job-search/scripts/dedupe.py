@@ -67,7 +67,7 @@ def dedupe_cross_source(jobs: list["Job"]) -> list["Job"]:
 
     For each cluster we KEEP the job whose ``snippet`` is the longest
     (a cheap proxy for "richest body" — the version most likely to
-    survive Sonnet's contextual-fit reasoning intact). Ties are broken
+    survive Codex's contextual-fit reasoning intact). Ties are broken
     by input order (first occurrence wins).
 
     Returns a new list, preserving the relative order of the kept jobs

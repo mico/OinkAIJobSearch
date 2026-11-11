@@ -13,7 +13,9 @@ profile_*.pdf
 profile_*.txt
 resume_*.pdf
 resume_*.txt
+!/skill/job-search/scripts/prompts/resume_tailor.txt
 test_write_*
 launchd/
 *.local.yaml
 *.local.json
+logs/

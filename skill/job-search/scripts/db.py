@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-def profile_hash(resume_text: str, prefs_text: str) -> str:
+def profile_hash(resume_text: str, prefs_text: str, *, scorer: str = "") -> str:
     """Stable cache key over the inputs that drive scoring.
 
     sha1 truncated to 16 hex chars is plenty at our scale (≪ 2^32 cached
@@ -37,8 +37,10 @@ def profile_hash(resume_text: str, prefs_text: str) -> str:
     # materially so cached verdicts from the old rubric stop matching.
     # (2026-07-17: "np3" = neutralplus-v3 replaced the doctrine prompt;
     #  "np4" = +R7 seniority-bar cap, +R8 thin-content cap.)
-    blob = f"{resume}\n----\n{prefs}\n----\nscorer:np4".encode("utf-8")
-    return hashlib.sha1(blob).hexdigest()[:16]
+    blob = f"{resume}\n----\n{prefs}\n----\nscorer:np4"
+    if scorer:
+        blob += f"\n{scorer}"
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
 SCHEMA = """
@@ -340,7 +342,7 @@ CREATE INDEX IF NOT EXISTS idx_magic_tokens_email ON magic_tokens(email);
 
 -- Durable cache of onboarding-copy translations. One row per
 -- (target lang, sha1 of the RAW English string); `translated` is the
--- Mistral output. Keyed so each English string translates at most once
+-- Codex output. Keyed so each English string translates at most once
 -- per language. Onboarding-only (onboarding.translate); English never
 -- writes here (it's the identity path). See onboarding.py.
 CREATE TABLE IF NOT EXISTS ui_translations (
@@ -1934,7 +1936,12 @@ class DB:
     # ---------- jobs ----------
 
     def upsert_job(self, job: dict) -> bool:
-        """Insert the job if new. Returns True if inserted, False if already existed."""
+        """Persist current content; return True only for a newly inserted job.
+
+        Refreshing a known posting invalidates its scores and queued matches
+        atomically when scoring inputs change. Historical digests and sent
+        messages remain intact, as does the original first_seen_at.
+        """
         now = time.time()
         with self._conn() as c:
             cur = c.execute(
@@ -1950,7 +1957,27 @@ class DB:
                     job.get("salary"), now,
                 ),
             )
-            return cur.rowcount > 0
+            if cur.rowcount > 0:
+                return True
+            fields = ("title", "company", "location", "url", "posted_at", "snippet", "salary")
+            params = {field: job.get(field) for field in fields}
+            params["job_id"] = job["job_id"]
+            refreshed = c.execute(
+                """
+                UPDATE jobs SET title=:title, company=:company, location=:location,
+                    url=:url, posted_at=:posted_at, snippet=:snippet, salary=:salary
+                WHERE job_id=:job_id AND (
+                    title IS NOT :title OR company IS NOT :company
+                    OR location IS NOT :location OR url IS NOT :url
+                    OR posted_at IS NOT :posted_at OR snippet IS NOT :snippet
+                    OR salary IS NOT :salary)
+                """,
+                params,
+            )
+            if refreshed.rowcount:
+                c.execute("DELETE FROM job_scores WHERE job_id=?", (job["job_id"],))
+                c.execute("DELETE FROM queued_matches WHERE job_id=?", (job["job_id"],))
+            return False
 
     def get_job(self, job_id: str) -> sqlite3.Row | None:
         with self._conn() as c:

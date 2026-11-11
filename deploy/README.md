@@ -15,8 +15,8 @@ Everything code-side is done; these are the operator steps:
    beyond the bot basics:
    - `REDIRECT_BASE_URL` → `https://yourdomain.tld`, `REDIRECT_HMAC_SECRET`
      (`openssl rand -hex 32`).
-   - `ANTHROPIC_API_KEY` — the real profile build + scoring.
-   Then `sudo bash /home/oink/app/deploy/bootstrap.sh`.
+   Then `sudo bash /home/oink/app/deploy/bootstrap.sh`, followed by
+   `sudo -u oink -H codex login` (ChatGPT sign-in; see "Codex auth").
 3. **Domain swap** in the Caddyfile (see "Domain swap" below).
 4. **Recommended — continuous mode** so feeds refresh ~2h instead of
    daily: add `OINK_CONTINUOUS_MODE=1` to `.env` (do NOT set
@@ -97,7 +97,7 @@ Everything else is throwaway and can be redeployed at will.
 5. **Edit `/home/oink/.env`**. Bootstrap creates it from `env.example`
    with `chmod 600` if missing. Fill in:
    - `TELEGRAM_BOT_TOKEN` from @BotFather
-   - `ANTHROPIC_API_KEY` (recommended) — see "Anthropic auth" below
+   - Optional `OINK_CODEX_BIN` / `OINK_CODEX_MODEL` — see "Codex auth" below
    - `REDIRECT_HMAC_SECRET=$(openssl rand -hex 32)`
    - `REDIRECT_BASE_URL` — set to `https://oink.example.com` (or your real
      domain).
@@ -185,26 +185,27 @@ schedule and credentials):
 What to back up: `/home/oink/state/` (DB + per-user files) and
 `/home/oink/.env` (secrets). Skip `/home/oink/app/` — that's redeployable.
 
-## Anthropic auth
+## Codex auth
 
-The bot's profile builder, market_research, and fit_analyzer all shell out
-to the `claude` CLI. Two modes:
+Every AI feature uses the Codex CLI installed by bootstrap: automated scoring
+and audits, profile builds, tailoring, fit analysis, contact lookup, web
+discovery/liveness checks, and market research. Authenticate with ChatGPT
+as the **same OS user that runs the systemd service**:
 
-- **Recommended — API key in `.env`**:
-  ```env
-  ANTHROPIC_API_KEY=sk-ant-...
-  ```
-  Non-interactive, works from a fresh boot. Get a key at
-  <https://console.anthropic.com/settings/keys>.
-- **Interactive OAuth**:
-  ```bash
-  sudo -u oink -H bash -lc 'claude'
-  ```
-  …and follow the device-flow prompts once. Stores credentials in
-  `/home/oink/.claude/`. Survives reboots; breaks if the user is rotated.
+```bash
+sudo -u oink -H codex login
+```
 
-If neither is configured, the bot keeps running but every Claude-backed
-feature falls back to its heuristic (still useful, just less smart).
+Follow the ChatGPT sign-in flow (use `codex login --device-auth` on a
+headless host). Credentials are stored in the service user's Codex home
+(normally `/home/oink/.codex/`); keep that directory private and preserve the
+same user/home across restarts. Restart `oink-bot` after authentication.
+No Anthropic API key or provider-selection setting is needed or used.
+
+If systemd cannot find `codex`, set `OINK_CODEX_BIN` in `/home/oink/.env`
+to its absolute installed path. Optional `OINK_CODEX_MODEL` overrides the
+CLI default across all AI features. Without a valid Codex login, AI features
+fail rather than falling back to a different AI provider.
 
 ## Domain swap
 

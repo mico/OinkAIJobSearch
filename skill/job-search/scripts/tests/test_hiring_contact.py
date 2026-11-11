@@ -46,7 +46,7 @@ def _job(ext_id: str = "x1", **kw) -> Job:
 
 
 def _envelope(payload: dict) -> str:
-    """Fake `claude -p --output-format json` stdout."""
+    """Fake `codex -p --output-format json` stdout."""
     return json.dumps({"result": json.dumps(payload)})
 
 

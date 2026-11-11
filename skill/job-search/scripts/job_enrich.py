@@ -1,6 +1,6 @@
 """AI-driven job matching (the sole matching gate, algorithm v2).
 
-For every new posting from every source we ask the `claude` CLI (Haiku)
+For every new posting from every source we ask the configured scoring model
 to decide fit against the candidate's RESUME and PREFS. v2 changes vs v1:
 
   * inputs are RAW TEXT — both `resume.txt` (verbatim resume body) and
@@ -12,7 +12,7 @@ to decide fit against the candidate's RESUME and PREFS. v2 changes vs v1:
   * outputs add an explicit `why_mismatch` field alongside `why_match`,
     so the digest can render BOTH "what aligns" and "what doesn't" — the
     user has been asking for this signal since the algorithm-v1 reviews.
-  * single-pass Haiku by default (no Sonnet two-pass). Operator can flip
+  * single-pass primary by default (no rescore two-pass). Operator can flip
     `defaults.ai_two_pass=True` if/when triage proves noisy again.
 
 Per-batch verdict shape:
@@ -36,14 +36,14 @@ Per-batch verdict shape:
 
 Design decisions:
   - This is now the ONLY matching gate. The old keyword/regex post_filter in
-    search_jobs.py has been neutered — Claude holistically decides using the
+    search_jobs.py has been neutered — Codex holistically decides using the
     resume + the user's preference dict. The legacy keyword/title/locations
     fields (formerly in `config/filters.yaml`, now removed) are NOT consulted.
-  - Smallest model (Haiku) per operator instruction. Cheap + fast enough to
+  - Smallest model (primary) per operator instruction. Cheap + fast enough to
     run on every fetched posting from every source (LinkedIn, HN, remoteok,
     remotive, weworkremotely, curated boards, web_search).
   - ONE batched CLI call per user per run. Cheaper, faster, and avoids the
-    `claude -p` startup cost being multiplied by N.
+    `codex -p` startup cost being multiplied by N.
   - Strict JSON-only output. We re-key by `external_id` (stable across runs)
     so partial responses still associate correctly.
   - Per-field length caps in the prompt — Telegram messages are tight on space.
@@ -59,18 +59,26 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 from urllib.parse import unquote
 
-from claude_cli import (
+from codex_cli import (
     extract_assistant_text, parse_json_block, SMALLEST_MODEL, MID_MODEL,
 )
 from instrumentation.wrappers import wrapped_run_p
-import sdk_scoring
 from dedupe import Job
 from text_utils import fix_mojibake
 
 log = logging.getLogger(__name__)
+
+
+def scoring_profile_hash(resume_text: str, prefs_text: str) -> str:
+    """Shared cache and delivery-buffer key for the active scoring model."""
+    from db import profile_hash
+
+    scorer = f"codex:{os.environ.get('OINK_CODEX_MODEL', '').strip() or 'default'}"
+    return profile_hash(resume_text, prefs_text, scorer=scorer)
 
 
 # Per-batch failure reasons surfaced in forensic logs and at the call site.
@@ -79,7 +87,7 @@ log = logging.getLogger(__name__)
 _BATCH_OK = "ok"
 _BATCH_CLI_MISSING = "cli_missing"      # wrapped_run_p returned None and elapsed << timeout (true CLI absence or fast crash)
 _BATCH_TIMEOUT = "timeout"              # wrapped_run_p returned None and elapsed ≈ timeout_s — slow CLI cut off by transport
-_BATCH_EMPTY_RESULT = "empty_result"    # CLI envelope had result="" — Haiku produced no JSON
+_BATCH_EMPTY_RESULT = "empty_result"    # CLI envelope had result="" — primary produced no JSON
 _BATCH_PARSE_ERROR = "parse_error"      # body wasn't a JSON object / no `results` list
 _BATCH_PARTIAL = "partial"              # results parsed but fewer verdicts than postings sent
 
@@ -87,7 +95,7 @@ _BATCH_PARTIAL = "partial"              # results parsed but fewer verdicts than
 # timeout rather than a genuinely missing CLI. 0.9 leaves margin for the
 # Python-side overhead between subprocess.TimeoutExpired and the wrapper
 # returning, while still being well above the sub-second latency of a
-# `claude` binary that isn't installed.
+# `codex` binary that isn't installed.
 _TIMEOUT_ELAPSED_THRESHOLD = 0.9
 
 
@@ -183,6 +191,39 @@ R8 THIN CONTENT. If the posting body is missing or too thin to verify
    sentences of real description), cap the score at 2 no matter how well
    the TITLE matches — a title alone cannot clear R2-R5, and empty
    listings are disproportionately ghost/agency posts.
+
+R9 SOCIAL POSTS. Postings whose url is on reddit.com or x.com are free-form
+   social posts. Score 0 when the author is OFFERING themselves or their
+   services ("[For Hire]", "available for freelance", "open to work",
+   "looking for a job", portfolio showcase), when it is a discussion,
+   question, course/bootcamp promo, or engagement bait with no concrete
+   role, or when it is unpaid / equity-only / "exposure" work. A real
+   opening posted by an employer, founder, or recruiter is scored by the
+   normal rules. For R8, a "--- Linked page ---" section in the snippet
+   counts as the posting body.
+   Two kinds of real openings, judged differently:
+   (a) DIRECT HIRING POSTS — a founder, CTO, hiring manager, or team
+       member announcing their own team's opening ("we're hiring",
+       "my team is looking for", "DM me"). The candidate can message this
+       person directly, which makes these more valuable than an ATS
+       listing. Such posts are short by nature, so SILENCE alone is not a
+       disqualifier: when the post names no location or remote policy,
+       R3's on-site assumption does not apply (there is no listed
+       location to assume), and R8's thin-content cap does not apply to
+       requirements the post simply leaves out. If the role family and
+       stack clearly match the candidate and NOTHING in the post (or its
+       linked page) excludes them, score up to 4 and name in
+       `why_mismatch` exactly what the candidate should confirm in a DM
+       (e.g. "Remote/location unstated — confirm Thailand-based remote
+       is OK"). Reserve 5 for posts that also state an eligibility the
+       candidate meets. Anything the post DOES say still binds: "US
+       only", "onsite NYC", a level above the candidate, etc. are judged
+       by R1-R7 as usual.
+   (b) REPOSTS by job boards / aggregator accounts (one account posting
+       many unrelated companies' roles, e.g. "🤖 Acme is now hiring for a
+       remote X", "NEW ROLES AT ...", "WORK FROM HOME JOBS") are ordinary
+       listings: judge them on the linked page with every normal rule,
+       including R3 and R8. They are not direct contacts.
 
 For every posting:
 
@@ -301,7 +342,7 @@ def _job_to_brief(j: Job) -> dict[str, str]:
 
     `snippet` is the full posting body when the source adapter fetched
     a detail page (algorithm v2.2 — Option 4). Cap raised to 4000 chars
-    to actually surface what the adapter captured; Sonnet handles the
+    to actually surface what the adapter captured; rescore handles the
     larger prompt comfortably at batch=10. Older sources that only emit
     listing-card snippets stay well under this cap, so it's a no-op for
     them.
@@ -352,8 +393,8 @@ def enrich_jobs_ai(
     two_pass: bool = False,
     triage_floor: int = 2,
     triage_ceiling: int = 6,
-    sonnet_max_jobs_per_call: int | None = None,
-    sonnet_timeout_s: int | None = None,
+    rescore_max_jobs_per_call: int | None = None,
+    rescore_timeout_s: int | None = None,
     workers: int = 4,
     db=None,
     chat_id: int | None = None,
@@ -380,40 +421,40 @@ def enrich_jobs_ai(
       timeout_s:       Per-CLI-call timeout. The caller passes the full
                        batch timeout; individual chunks share it.
       max_jobs_per_call: PRIMARY-pass chunk size. In two-pass mode this is
-                       the Haiku batch size; in single-pass mode it's the
-                       Sonnet batch size.
-      two_pass:        Off by default in v2. When True, runs a Sonnet
-                       re-score on Haiku survivors in the
+                       the primary batch size; in single-pass mode it's the
+                       rescore batch size.
+      two_pass:        Off by default in v2. When True, runs a rescore
+                       re-score on primary survivors in the
                        [triage_floor, triage_ceiling) score window.
-                       Operator can flip this on if Haiku noise returns.
-      triage_floor:    Only meaningful when `two_pass=True`. Haiku score
-                       must be AT OR ABOVE this to be sent to Sonnet.
-      triage_ceiling:  Only meaningful when `two_pass=True`. Haiku scores
-                       AT OR ABOVE this are TRUSTED and skip the Sonnet
-                       rescore — saves the expensive call when Haiku is
+                       Operator can flip this on if primary noise returns.
+      triage_floor:    Only meaningful when `two_pass=True`. primary score
+                       must be AT OR ABOVE this to be sent to rescore.
+      triage_ceiling:  Only meaningful when `two_pass=True`. primary scores
+                       AT OR ABOVE this are TRUSTED and skip the rescore
+                       rescore — saves the expensive call when primary is
                        already saying "perfect fit". Default 6 (open) for
                        backwards compatibility; production sets 5 via
-                       defaults.ai_triage_ceiling so Haiku=5 verdicts pass
+                       defaults.ai_triage_ceiling so primary=5 verdicts pass
                        straight through. The full scoring doctrine still
-                       applies to every Sonnet call this knob does fire on
-                       — it controls ROUTING only, not what Sonnet looks at.
-      sonnet_max_jobs_per_call: SONNET-pass chunk size in two-pass mode.
+                       applies to every rescore call this knob does fire on
+                       — it controls ROUTING only, not what rescore looks at.
+      rescore_max_jobs_per_call: RESCORE-pass chunk size in two-pass mode.
                        Defaults to None → falls back to max_jobs_per_call
-                       (legacy behaviour). Set smaller than the Haiku
-                       batch size to cut Sonnet wall time per batch when
+                       (legacy behaviour). Set smaller than the primary
+                       batch size to cut rescore wall time per batch when
                        the prompt template (~9k fixed-overhead doctrine
                        tokens) makes 10-job batches stall 5-9 minutes.
                        Ignored in single-pass mode.
-      sonnet_timeout_s: SONNET-pass per-CLI-call timeout in two-pass mode.
+      rescore_timeout_s: RESCORE-pass per-CLI-call timeout in two-pass mode.
                        Defaults to None → falls back to `timeout_s`
                        (legacy behaviour). Set tight (≈ 300s) to cap
-                       worst-case Sonnet batch wall time; on hit, the
+                       worst-case rescore batch wall time; on hit, the
                        affected batch is retried ONCE at batch_size=1.
                        Single-job batches that ALSO time out are
                        LOGGED + DROPPED — we do NOT fall back to the
-                       Haiku verdict because that would mix verdict
+                       primary verdict because that would mix verdict
                        provenance in `job_scores` (some rows tagged
-                       "sonnet" but actually from Haiku). Haiku
+                       "rescore" but actually from primary). primary
                        triage in two-pass mode keeps the generous
                        `timeout_s` budget so the cheap fast call is
                        unaffected. Ignored in single-pass mode.
@@ -458,8 +499,7 @@ def enrich_jobs_ai(
     phash: str | None = None
     if cache_enabled:
         try:
-            from db import profile_hash as _profile_hash
-            phash = _profile_hash(resume_text, prefs_text)
+            phash = scoring_profile_hash(resume_text, prefs_text)
             job_ids = [j.job_id for j in jobs]
             cached_by_job_id = db.get_cached_scores(int(chat_id), job_ids, phash)
         except Exception:
@@ -490,19 +530,8 @@ def enrich_jobs_ai(
         # Everyone was cached.
         return cached_by_ext
 
-    # Model selection:
-    #   * single-pass (two_pass=False): Sonnet for every job. v2.1 default
-    #     because Haiku was noisy at the 4-vs-3 boundary on its own.
-    #   * two-pass (two_pass=True): Haiku triages every job cheap, then
-    #     Sonnet re-scores only survivors at `triage_floor`. Cost cut
-    #     ~5-8× vs single-pass Sonnet; Sonnet still arbitrates the
-    #     borderline cases where Haiku is unreliable.
-    if two_pass:
-        primary_model = SMALLEST_MODEL  # haiku
-        primary_label = "haiku"
-    else:
-        primary_model = MID_MODEL       # sonnet
-        primary_label = "sonnet"
+    primary_model = SMALLEST_MODEL
+    primary_label = "primary"
 
     first_out = _enrich_pool(
         to_score, resume_text, prefs_text, timeout_s,
@@ -514,7 +543,7 @@ def enrich_jobs_ai(
         # Persist freshly-scored verdicts before merging back with cache.
         if cache_enabled and phash and first_out:
             _persist_scores(db, int(chat_id), phash, first_out,
-                            to_score, primary_label)
+                            to_score)
         # Merge cached hits + new verdicts. Cached entries never collide
         # with fresh ones because to_score == jobs - cached.
         merged_out = dict(cached_by_ext)
@@ -522,41 +551,41 @@ def enrich_jobs_ai(
         return merged_out
 
     # Window: triage_floor (inclusive) .. triage_ceiling (exclusive).
-    # Haiku verdicts AT OR ABOVE triage_ceiling are TRUSTED — Sonnet
-    # gets no chance to re-grade them. We are BETTING that the Haiku-5
-    # downgrade rate is low; the 7d aggregate Sonnet downgrade rate
-    # across the full Haiku>=2 pool is ~55%, and we do NOT have a
-    # Haiku=5-specific number yet (job_scores stamps only the final
+    # primary verdicts AT OR ABOVE triage_ceiling are TRUSTED — rescore
+    # gets no chance to re-grade them. We are BETTING that the primary-5
+    # downgrade rate is low; the 7d aggregate rescore downgrade rate
+    # across the full primary>=2 pool is ~55%, and we do NOT have a
+    # primary=5-specific number yet (job_scores stamps only the final
     # model; merge logs aggregate). The per-job forensic emit below is
     # the audit trail that lets the operator look at any individual 5/5
-    # alert and ask "would Sonnet have downgraded it?" — and the basis
-    # for measuring the trust-Haiku-5 error rate over time.
+    # alert and ask "would rescore have downgraded it?" — and the basis
+    # for measuring the trust-primary-5 error rate over time.
     # The triage_ceiling=6 default keeps every score (incl. 5) routed
-    # to Sonnet so existing callers / tests see no behaviour change;
+    # to rescore so existing callers / tests see no behaviour change;
     # defaults.ai_triage_ceiling=5 is what flips this on in production.
     survivors: list[Job] = []
     trusted_top_jobs: list[Job] = []
     for j in to_score:
-        haiku_score = int(
+        primary_score = int(
             (first_out.get(j.external_id) or {}).get("match_score") or 0
         )
-        if haiku_score >= triage_ceiling:
+        if primary_score >= triage_ceiling:
             trusted_top_jobs.append(j)
-        elif haiku_score >= triage_floor:
+        elif primary_score >= triage_floor:
             survivors.append(j)
 
-    # Per-job forensic emit: ONE line per Haiku verdict that bypassed
-    # Sonnet. Shape `{job_id, ext_id, title, company, haiku_score,
+    # Per-job forensic emit: ONE line per primary verdict that bypassed
+    # rescore. Shape `{job_id, ext_id, title, company, primary_score,
     # triage_ceiling}` so an operator chasing a bogus 5/5 alert can
     # `jq 'select(.op=="enrich_jobs_ai.trusted_top")'` the forensic
     # stream and find the audit trail in O(1). This is the SINGLE place
     # in the codebase where a verdict can be promoted to a final score
-    # without a Sonnet vote, so it needs to be queryable per-job.
+    # without a rescore vote, so it needs to be queryable per-job.
     if trusted_top_jobs:
         try:
             from forensic import log_step as _flog
             for j in trusted_top_jobs:
-                haiku_v = first_out.get(j.external_id) or {}
+                primary_v = first_out.get(j.external_id) or {}
                 _flog(
                     "enrich_jobs_ai.trusted_top",
                     input={
@@ -566,9 +595,9 @@ def enrich_jobs_ai(
                         "company": j.company,
                     },
                     output={
-                        "haiku_score": int(haiku_v.get("match_score") or 0),
+                        "primary_score": int(primary_v.get("match_score") or 0),
                         "triage_ceiling": triage_ceiling,
-                        "why_match": haiku_v.get("why_match", ""),
+                        "why_match": primary_v.get("why_match", ""),
                     },
                 )
         except Exception:
@@ -576,76 +605,76 @@ def enrich_jobs_ai(
                 "enrich_jobs_ai.trusted_top forensic emit failed; continuing",
                 exc_info=True,
             )
-    trusted_haiku_top_count = len(trusted_top_jobs)
+    trusted_primary_top_count = len(trusted_top_jobs)
     if not survivors:
         log.info(
-            "enrich_jobs_ai: two-pass — 0 survivors in Haiku window "
+            "enrich_jobs_ai: two-pass — 0 survivors in primary window "
             "[floor=%d, ceiling=%d) (trusted-top=%d)",
-            triage_floor, triage_ceiling, trusted_haiku_top_count,
+            triage_floor, triage_ceiling, trusted_primary_top_count,
         )
-        # No Sonnet pass: the only verdicts produced were Haiku's. Persist
-        # them under the haiku label.
+        # No rescore pass: the only verdicts produced were primary's. Persist
+        # them under the primary label.
         if cache_enabled and phash and first_out:
             _persist_scores(db, int(chat_id), phash, first_out,
-                            to_score, primary_label)
+                            to_score)
         merged_out = dict(cached_by_ext)
         merged_out.update(first_out)
         return merged_out
 
-    sonnet_batch_size = int(sonnet_max_jobs_per_call or max_jobs_per_call)
-    if sonnet_batch_size < 1:
-        sonnet_batch_size = max_jobs_per_call
-    # Sonnet gets its OWN, tighter timeout (production: 300s vs Haiku's
-    # 1200s). The split is justified by measured latency: Sonnet p95 was
-    # 408s and the worst-case batch hit 530s pre-batch-cap; Haiku p99
+    rescore_batch_size = int(rescore_max_jobs_per_call or max_jobs_per_call)
+    if rescore_batch_size < 1:
+        rescore_batch_size = max_jobs_per_call
+    # rescore gets its OWN, tighter timeout (production: 300s vs primary's
+    # 1200s). The split is justified by measured latency: rescore p95 was
+    # 408s and the worst-case batch hit 530s pre-batch-cap; primary p99
     # is 176s. Same per-call budget for both would either over-tax
-    # Haiku (waste capacity / mask real failures) or under-tax Sonnet
+    # primary (waste capacity / mask real failures) or under-tax rescore
     # (silently burn the iter's wall-time budget on slow successes).
     # Fall back to `timeout_s` for callers that don't supply the
     # dedicated knob (legacy + test paths).
-    effective_sonnet_timeout = int(
-        sonnet_timeout_s if sonnet_timeout_s is not None else timeout_s
+    effective_rescore_timeout = int(
+        rescore_timeout_s if rescore_timeout_s is not None else timeout_s
     )
     log.info(
-        "enrich_jobs_ai: two-pass — %d/%d jobs in Sonnet window "
+        "enrich_jobs_ai: two-pass — %d/%d jobs in rescore window "
         "[floor=%d, ceiling=%d); trusted-top=%d; rescoring with %s "
         "(batch=%d, timeout=%ds)",
         len(survivors), len(to_score), triage_floor, triage_ceiling,
-        trusted_haiku_top_count, MID_MODEL, sonnet_batch_size,
-        effective_sonnet_timeout,
+        trusted_primary_top_count, MID_MODEL, rescore_batch_size,
+        effective_rescore_timeout,
     )
-    # Track Sonnet drops (batch-1 retry that also timed out). The pool
-    # populates this set; we use it to evict the Haiku verdict for those
+    # Track rescore drops (batch-1 retry that also timed out). The pool
+    # populates this set; we use it to evict the primary verdict for those
     # jobs from `merged` so the downstream pipeline doesn't see a
-    # silent Haiku-only verdict where Sonnet was meant to vote.
-    sonnet_dropped_ext_ids: set[str] = set()
-    sonnet_out = _enrich_pool(
-        survivors, resume_text, prefs_text, effective_sonnet_timeout,
-        sonnet_batch_size, model=MID_MODEL, pass_label="sonnet",
+    # silent primary-only verdict where rescore was meant to vote.
+    rescore_dropped_ext_ids: set[str] = set()
+    rescore_out = _enrich_pool(
+        survivors, resume_text, prefs_text, effective_rescore_timeout,
+        rescore_batch_size, model=MID_MODEL, pass_label="rescore",
         workers=workers,
-        # Sonnet timeout recovery: retry timed-out batches at
-        # batch_size=1, drop on second-pass timeout (no Haiku fallback;
+        # rescore timeout recovery: retry timed-out batches at
+        # batch_size=1, drop on second-pass timeout (no primary fallback;
         # see _enrich_pool docstring for provenance rationale).
         timeout_retry_with_batch_one=True,
-        dropped_ext_ids_out=sonnet_dropped_ext_ids,
+        dropped_ext_ids_out=rescore_dropped_ext_ids,
     )
 
-    # Merge: Sonnet overwrites Haiku where present, else Haiku stands —
-    # EXCEPT for jobs Sonnet was supposed to grade but dropped
+    # Merge: rescore overwrites primary where present, else primary stands —
+    # EXCEPT for jobs rescore was supposed to grade but dropped
     # (transport failure on batch=1 retry). Those are evicted from the
     # merged map entirely; the downstream send pipeline treats them as
-    # "no verdict" rather than letting a Haiku-3 leak through with
-    # honest-but-wrong provenance ("Haiku triaged this as borderline
-    # AND Sonnet voted on it" — the second clause is false).
+    # "no verdict" rather than letting a primary-3 leak through with
+    # honest-but-wrong provenance ("primary triaged this as borderline
+    # AND rescore voted on it" — the second clause is false).
     merged = dict(first_out)
-    if sonnet_dropped_ext_ids:
-        for ext_id in sonnet_dropped_ext_ids:
+    if rescore_dropped_ext_ids:
+        for ext_id in rescore_dropped_ext_ids:
             merged.pop(ext_id, None)
     upgrades = downgrades = unchanged = 0
-    for ext_id, sonnet_v in sonnet_out.items():
+    for ext_id, rescore_v in rescore_out.items():
         prev = (first_out.get(ext_id) or {}).get("match_score") or 0
-        new = (sonnet_v or {}).get("match_score") or 0
-        merged[ext_id] = sonnet_v
+        new = (rescore_v or {}).get("match_score") or 0
+        merged[ext_id] = rescore_v
         if new > prev:
             upgrades += 1
         elif new < prev:
@@ -654,21 +683,17 @@ def enrich_jobs_ai(
             unchanged += 1
     log.info(
         "enrich_jobs_ai: two-pass merge — upgrades=%d downgrades=%d "
-        "unchanged=%d (survivors not re-scored: %d, sonnet-dropped: %d)",
+        "unchanged=%d (survivors not re-scored: %d, rescore-dropped: %d)",
         upgrades, downgrades, unchanged,
-        len(survivors) - len(sonnet_out) - len(sonnet_dropped_ext_ids),
-        len(sonnet_dropped_ext_ids),
+        len(survivors) - len(rescore_out) - len(rescore_dropped_ext_ids),
+        len(rescore_dropped_ext_ids),
     )
 
     # ----- Persist freshly-scored verdicts back to the cache ----------
-    # Each row's `model` reflects the final pass that produced its
-    # verdict: "sonnet" for entries Sonnet re-scored, else "haiku".
+    # Both passes use the configured Codex model.
     if cache_enabled and phash and merged:
-        sonnet_ext_ids = set(sonnet_out.keys())
         _persist_scores(
             db, int(chat_id), phash, merged, to_score,
-            primary_label,  # default ("haiku")
-            sonnet_ext_ids=sonnet_ext_ids,
         )
 
     # Merge cached hits into the final return (cached entries are
@@ -684,20 +709,15 @@ def _persist_scores(
     profile_hash_value: str,
     verdicts_by_ext: dict[str, dict],
     scored_jobs: list[Job],
-    default_label: str,
-    *,
-    sonnet_ext_ids: set[str] | None = None,
 ) -> None:
     """Translate the {external_id → enrichment} dict produced this run
     into {job_id → enrichment} and bulk-upsert into job_scores.
 
     Cache rows are keyed by Job.job_id (stable sha1 of source+url) so
     a job is reusable across re-runs even if its external_id rotates.
-    `sonnet_ext_ids`, when provided, marks the entries that survived
-    a Sonnet re-score so they're tagged "sonnet" instead of the
-    default model label.
     """
     ext_to_job_id = {j.external_id: j.job_id for j in scored_jobs}
+    default_label = os.environ.get("OINK_CODEX_MODEL", "").strip() or "codex"
     by_job_id_local: dict[str, dict] = {}
     for ext_id, enr in verdicts_by_ext.items():
         if not isinstance(enr, dict):
@@ -709,10 +729,7 @@ def _persist_scores(
             # braces here so a future regression can't corrupt the cache.
             continue
         row = dict(enr)
-        if sonnet_ext_ids is not None:
-            row["model"] = "sonnet" if ext_id in sonnet_ext_ids else default_label
-        else:
-            row["model"] = default_label
+        row["model"] = default_label
         by_job_id_local[jid] = row
     if not by_job_id_local:
         return
@@ -738,8 +755,8 @@ def _enrich_pool(
     dropped_ext_ids_out: set[str] | None = None,
 ) -> dict[str, dict]:
     """Run one model over a job pool, batching as needed. Returns the
-    {external_id → enrichment} map. Used for both single-pass Haiku and
-    the optional two-pass Sonnet re-score.
+    {external_id → enrichment} map. Used for both single-pass primary and
+    the optional two-pass rescore re-score.
 
     Batches dispatch concurrently via a thread pool (`workers` knob).
     `wrapped_run_p` records each call into `claude_calls` via fresh
@@ -753,17 +770,17 @@ def _enrich_pool(
     possible prompt payload — if THAT also times out we log and drop
     the job rather than fall back to a different model's verdict (which
     would mix verdict provenance in `job_scores`). Currently used for
-    the Sonnet rescore pass only; the Haiku triage pass keeps the
+    the rescore rescore pass only; the primary triage pass keeps the
     original "best-effort, no timeout recovery" behaviour because its
     timeout is generous (1200s) and the wall-time cost of a stuck
-    Haiku batch is one of 4 workers, not the whole iter's budget.
+    primary batch is one of 4 workers, not the whole iter's budget.
 
     `dropped_ext_ids_out`: optional set populated with the external_ids
     of jobs that were scheduled for this pool but produced NO verdict
     (transport-dropped — batch=1 retry timed out). The caller uses this
-    to evict the Haiku-only verdict from the merged output: keeping it
-    would be CORRECT provenance for "Haiku scored, Sonnet skipped" but
-    INCORRECT for "Haiku triaged, Sonnet was supposed to vote but
+    to evict the primary-only verdict from the merged output: keeping it
+    would be CORRECT provenance for "primary scored, rescore skipped" but
+    INCORRECT for "primary triaged, rescore was supposed to vote but
     transport failed" — those are semantically different outcomes and
     only the latter is a drop. Only populated when
     `timeout_retry_with_batch_one=True`.
@@ -830,15 +847,15 @@ def _enrich_pool(
         )
 
     # ---- Timeout-recovery path: retry timed-out chunks at batch_size=1.
-    # Only fires when the caller opted in (Sonnet rescore today). Each
+    # Only fires when the caller opted in (rescore rescore today). Each
     # timed-out chunk's jobs go through one CLI call apiece. We drop
     # `allow_split_retry` for these single-job calls — there's nothing
     # smaller to split into — but `_enrich_one_chunk` still measures
     # elapsed time and stamps `_BATCH_TIMEOUT` again if the single-job
     # call ALSO exceeds the timeout. Those final timeouts are logged
-    # and dropped: we deliberately do NOT fall back to a Haiku verdict
+    # and dropped: we deliberately do NOT fall back to a primary verdict
     # because mixing verdict provenance in `job_scores` (some rows
-    # tagged "sonnet" but actually from Haiku) would silently corrupt
+    # tagged "rescore" but actually from primary) would silently corrupt
     # the model-attribution metrics the operator uses to tune knobs.
     if timeout_retry_with_batch_one and timed_out_chunks:
         # Flatten + de-dupe (same job in multiple chunks is impossible by
@@ -905,10 +922,10 @@ def _enrich_pool(
         out.update(recovered)
 
         # Report dropped IDs so the caller can evict the corresponding
-        # Haiku-only verdicts from the final merged map. Without this
-        # the Haiku-3 vote leaks through tagged as "haiku" — wrong
-        # provenance: this isn't "Haiku scored, Sonnet skipped" (which
-        # would be a legitimate haiku label), it's "Sonnet was supposed
+        # primary-only verdicts from the final merged map. Without this
+        # the primary-3 vote leaks through tagged as "primary" — wrong
+        # provenance: this isn't "primary scored, rescore skipped" (which
+        # would be a legitimate primary label), it's "rescore was supposed
         # to vote but transport failed", which is a drop not a
         # downgrade.
         if dropped_ext_ids_out is not None:
@@ -925,12 +942,12 @@ def _enrich_pool(
 
         # Single forensic line summarising the timeout-recovery pass.
         # Operators chasing "where did 3 jobs in pipeline_run #N go?"
-        # can `jq 'select(.op=="enrich_jobs_ai.sonnet_timeout")'` and
+        # can `jq 'select(.op=="enrich_jobs_ai.rescore_timeout")'` and
         # find the exact recovered/dropped split for the run.
         try:
             from forensic import log_step as _flog
             _flog(
-                "enrich_jobs_ai.sonnet_timeout",
+                "enrich_jobs_ai.rescore_timeout",
                 input={
                     "batch_size": max_jobs_per_call,
                     "n_jobs": retry_total,
@@ -946,7 +963,7 @@ def _enrich_pool(
             )
         except Exception:
             log.debug(
-                "enrich_jobs_ai.sonnet_timeout forensic emit failed; continuing",
+                "enrich_jobs_ai.rescore_timeout forensic emit failed; continuing",
                 exc_info=True,
             )
 
@@ -961,13 +978,7 @@ _MAX_RESUME_PROMPT_CHARS = 12000
 _MAX_PREFS_PROMPT_CHARS = 4000
 
 
-# Split point for the SDK prompt-caching path. `_PROMPT` is
-# `<rubric + resume + prefs scaffolding>` followed by the volatile
-# `=== JOBS (JSON array) ===\n{jobs_json}` tail. The rubric+profile prefix
-# is byte-stable across every batch in a pass (same resume/prefs); the
-# job briefs are the only per-batch variation. Splitting at the JOBS
-# marker lets the SDK path put a cache_control breakpoint on the stable
-# prefix and the per-batch briefs after it. Computed once at import.
+# Separate the stable rubric/profile prefix from each batch's job payload.
 _JOBS_MARKER = "=== JOBS (JSON array) ===\n"
 _PROMPT_SPLIT_IDX = _PROMPT.rfind(_JOBS_MARKER) + len(_JOBS_MARKER)
 _PROMPT_PREFIX_TMPL = _PROMPT[:_PROMPT_SPLIT_IDX]   # contains {resume}, {prefs_text}
@@ -979,16 +990,7 @@ def _build_scoring_prompt(
 ) -> tuple[str, str]:
     """Build the (stable_prefix, volatile_suffix) prompt pair for one batch.
 
-    INVARIANT: `stable_prefix + volatile_suffix` is byte-for-byte equal to
-    `_PROMPT.format(resume=..., prefs_text=..., jobs_json=...)`. The CLI
-    path concatenates the two and is therefore UNCHANGED from before this
-    split existed; the SDK path sends them as two content blocks with a
-    cache breakpoint between. Keeping the identity means quality cannot
-    move between transports.
-
-    `stable_prefix` is the rubric + resume + prefs (constant per user per
-    pass — the cacheable part). `volatile_suffix` is just this batch's
-    jobs JSON.
+    Concatenating the pair preserves `_PROMPT.format(...)` exactly.
     """
     resume = (resume_text or "")[:_MAX_RESUME_PROMPT_CHARS]
     prefs = (prefs_text or "")[:_MAX_PREFS_PROMPT_CHARS]
@@ -1005,40 +1007,7 @@ def _run_scoring_batch(
     timeout_s: int,
     model: str,
 ) -> str | None:
-    """Run one scoring batch, choosing the transport AT CALL TIME.
-
-    Selection (the no-key guarantee lives here):
-      * ANTHROPIC_API_KEY ABSENT (current production) -> `sdk_available()`
-        is False -> the existing `wrapped_run_p` CLI path runs, with the
-        prompt reassembled as the exact same single string as before. Zero
-        behavior change for the live bot.
-      * ANTHROPIC_API_KEY PRESENT -> route through the Anthropic SDK
-        (`sdk_scoring.score_batch`) with cache_control on the rubric+profile
-        prefix. On ANY SDK error the call returns None and we FALL BACK to
-        the CLI path — the cycle never crashes on the SDK.
-
-    Both transports return / are normalised to a CLI-style JSON envelope
-    string (or None), so the caller parses both identically. This function
-    encapsulates the only place the two paths diverge.
-    """
-    if sdk_scoring.sdk_available():
-        envelope = sdk_scoring.score_batch(
-            None, caller, stable_prefix, volatile_suffix,
-            model=model, timeout_s=timeout_s,
-        )
-        if envelope is not None:
-            return envelope
-        # SDK path failed (error/timeout/unknown-model) — degrade to the
-        # CLI path rather than dropping the batch. Logged inside
-        # sdk_scoring at WARNING.
-        log.info(
-            "enrich_jobs_ai: SDK scoring returned None for %s — "
-            "falling back to CLI path", caller,
-        )
-    # Default / fallback: the existing wrapped CLI path. Reassemble the
-    # single prompt string (byte-identical to the pre-split build).
-    # json_mode: constrained JSON decoding on the Mistral leg (ignored by the
-    # Claude CLI leg) — the scoring prompt's whole contract is a JSON object.
+    """Run every scoring batch through the instrumented Codex CLI transport."""
     return wrapped_run_p(
         None, caller, stable_prefix + volatile_suffix,
         timeout_s=timeout_s, model=model, json_mode=True,
@@ -1056,14 +1025,14 @@ def _enrich_one_chunk(
     allow_split_retry: bool = True,
     _retry_depth: int = 0,
     model: str = SMALLEST_MODEL,
-    pass_label: str = "haiku",
+    pass_label: str = "primary",
 ) -> tuple[dict[str, dict], str]:
     """Enrich one chunk. Returns (verdicts_by_external_id, failure_reason).
 
     failure_reason is one of:
       _BATCH_OK            — all postings got a verdict back
       _BATCH_CLI_MISSING   — CLI unavailable / wrapped_run_p returned None
-      _BATCH_EMPTY_RESULT  — CLI succeeded but result text was empty (Haiku
+      _BATCH_EMPTY_RESULT  — CLI succeeded but result text was empty (primary
                              produced 0 chars of assistant text — the exact
                              failure mode that lost 25 jobs in pipeline_run #12)
       _BATCH_PARSE_ERROR   — response didn't parse as a JSON object with `results`
@@ -1072,10 +1041,10 @@ def _enrich_one_chunk(
     On failure (_CLI_MISSING / _EMPTY_RESULT / _PARSE_ERROR), if
     `allow_split_retry` is True and the chunk has >=2 jobs, we split it in
     half and retry each half once. This gives us a cheap second chance at
-    the model: a 25-job prompt is most likely to hit Haiku's empty-output
+    the model: a 25-job prompt is most likely to hit primary's empty-output
     glitch, two 12-job prompts are far less so.
 
-    On _BATCH_PARTIAL (Haiku returned valid JSON but skipped some IDs —
+    On _BATCH_PARTIAL (primary returned valid JSON but skipped some IDs —
     seen consistently on full 25-job batches in the 2026-05-02 cron run,
     one missing verdict per user per batch 4/5), we do a TARGETED re-ask:
     we build a fresh prompt containing only the missing jobs and call
@@ -1090,29 +1059,25 @@ def _enrich_one_chunk(
     # exactly, unlike a percent-encoded URL. See `_id_lookup`.
     key_by_ext, id_lookup = _id_lookup(chunk)
     briefs = _briefs_with_short_ids(chunk, key_by_ext)
-    # Split the prompt into the byte-stable rubric+profile prefix and the
-    # per-batch jobs suffix. The CLI path concatenates them (unchanged
-    # bytes); the SDK path caches the prefix. See `_build_scoring_prompt`.
+    # Build the rubric/profile prefix and this batch's job payload.
     stable_prefix, volatile_suffix = _build_scoring_prompt(
         resume_text, prefs_text,
         json.dumps(briefs, ensure_ascii=False),
     )
-    # Two-pass scoring: Haiku triage by default, Sonnet for the re-score on
+    # Two-pass scoring: primary triage by default, rescore for the re-score on
     # survivors. Caller threads `model` + `pass_label` so each batch's
     # forensic line carries the model used (handy when comparing pass
     # outcomes post-hoc).
     caller = f"job_enrich:{pass_label}"
     # Measure wall time around the call so we can distinguish a timeout
     # (transport returned None because the call was cut off, elapsed ≈
-    # timeout_s) from a true CLI absence / immediate crash / fast SDK
-    # error (elapsed ≈ 0). The two need different recovery paths: split-
+    # timeout_s) from a true CLI absence / immediate crash
+    # (elapsed ≈ 0). The two need different recovery paths: split-
     # retry is right for the "small chance the prompt confused the model"
     # cases (empty/parse/missing-fast), but a slow-success cutoff just
     # means the model is taking too long on THIS payload and a smaller
     # batch is the only thing that'll help. See `_BATCH_TIMEOUT`.
-    # `_run_scoring_batch` selects SDK-vs-CLI transport (gated on
-    # ANTHROPIC_API_KEY) and normalises both to a CLI-style JSON envelope,
-    # so everything below parses identically regardless of path.
+    reported_model = os.environ.get("OINK_CODEX_MODEL", "").strip() or model or "codex"
     import time as _time
     _started = _time.monotonic()
     stdout = _run_scoring_batch(
@@ -1127,7 +1092,7 @@ def _enrich_one_chunk(
 
     if stdout is None:
         # Distinguish timeout (slow CLI cut off) from true CLI-missing.
-        # `claude_cli.run_p` catches subprocess.TimeoutExpired and returns
+        # `codex_cli.run_p` catches subprocess.TimeoutExpired and returns
         # None — same return shape as "CLI not on PATH" — but elapsed time
         # disambiguates: a timeout takes ~timeout_s, a missing CLI takes
         # ~0s. Threshold at 90% of timeout_s leaves headroom for the
@@ -1137,7 +1102,7 @@ def _enrich_one_chunk(
             log.warning(
                 "enrich_jobs_ai: batch %d/%d TIMED OUT after %.1fs (cap=%ds, "
                 "model=%s) — %d jobs at risk",
-                batch_idx, total_batches, _elapsed, timeout_s, model, len(chunk),
+                batch_idx, total_batches, _elapsed, timeout_s, reported_model, len(chunk),
             )
         else:
             reason = _BATCH_CLI_MISSING
@@ -1203,7 +1168,8 @@ def _enrich_one_chunk(
                 "total_batches": total_batches,
                 "batch_size": len(chunk),
                 "retry_depth": _retry_depth,
-                "model": model,
+                "provider": provider,
+                "model": reported_model,
                 "pass": pass_label,
             },
             output={
@@ -1247,7 +1213,7 @@ def _enrich_one_chunk(
             reason = _BATCH_OK
 
     # Targeted re-ask path for jobs still missing a verdict. Two cases:
-    #   * _BATCH_PARTIAL — empirically (forensic logs 2026-05-02), Haiku
+    #   * _BATCH_PARTIAL — empirically (forensic logs 2026-05-02), primary
     #     drops exactly 1 verdict on full 25-job batches.
     #   * _BATCH_PARSE_ERROR / _BATCH_EMPTY_RESULT that the split-retry
     #     above couldn't recover — notably the model editorializing
@@ -1296,14 +1262,14 @@ def reanalyze_scoring_ai(
     prefs_text: str,
     *,
     timeout_s: int = 240,
-    model: str = "sonnet",
+    model: str | None = MID_MODEL,
     batch_size: int = 10,
     workers: int = 4,
     critic_rounds: int = 2,
-    critic_model: str = "sonnet",
+    critic_model: str | None = MID_MODEL,
 ) -> list[dict]:
     """v2.6 audit stage: re-grade score-≥1 verdicts with a second-opinion
-    model (Sonnet by default — `defaults.ai_scoring_audit_model`), split
+    Codex call (using the configured model), split
     into small batches dispatched in parallel, each batch paired with a
     runtime CRITIC (same model class) that re-verifies the scorer's
     output until both agree OR a round cap fires.
@@ -1331,12 +1297,12 @@ def reanalyze_scoring_ai(
       enrichments_by_external_id: original verdicts keyed by external_id.
       resume_text / prefs_text:   same blobs the scorer saw.
       timeout_s:   per-CLI-call timeout, shared by scorer + critic.
-      model:       scorer model (defaults to opus).
+      model:       scorer Codex model (defaults to the shared configuration).
       batch_size:  items per scorer call (default 10).
       workers:     parallel batches in flight (default 4).
       critic_rounds: max scorer↔critic rounds per batch before fall back
                    (default 3).
-      critic_model: critic model (default opus; may differ in future).
+      critic_model: critic Codex model (defaults to the shared configuration).
 
     Returns a list of audit dicts, one per posting:
         {
@@ -1570,6 +1536,10 @@ _AUDIT_SCORER_PROMPT_HEAD = (
 )
 
 
+def _run_audit_prompt(caller: str, prompt: str, *, timeout_s: int, model: str) -> str | None:
+    return wrapped_run_p(None, caller, prompt, timeout_s=timeout_s, model=model, json_mode=True)
+
+
 def _audit_batch_scorer(
     batch_jobs: list[Job],
     enrichments_by_external_id: dict[str, dict],
@@ -1637,8 +1607,7 @@ def _audit_batch_scorer(
     )
 
     caller = f"scoring_audit:b{batch_idx}r{round_idx}"
-    stdout = wrapped_run_p(None, caller, prompt,
-                          timeout_s=timeout_s, model=model, json_mode=True)
+    stdout = _run_audit_prompt(caller, prompt, timeout_s=timeout_s, model=model)
     if not stdout:
         log.warning(
             "reanalyze_scoring_ai: batch %d/%d round %d scorer CLI "
@@ -1711,7 +1680,7 @@ def _audit_batch_critic(
 
     On CLI failure or unparseable output we return (True, []) so the
     audit doesn't stall — "couldn't verify, accept scorer output" is
-    safer than blocking on a transient claude CLI hiccup.
+    safer than blocking on a transient codex CLI hiccup.
     """
     # Keep the whole audit loop on the scorer's opaque ids: the critic's
     # feedback is prepended to the scorer's NEXT-round prompt, whose items are
@@ -1776,8 +1745,7 @@ def _audit_batch_critic(
     )
 
     caller = f"scoring_audit_critic:b{batch_idx}r{round_idx}"
-    stdout = wrapped_run_p(None, caller, prompt,
-                          timeout_s=timeout_s, model=critic_model, json_mode=True)
+    stdout = _run_audit_prompt(caller, prompt, timeout_s=timeout_s, model=critic_model)
     if not stdout:
         # CLI hiccup — accept the scorer's output rather than stall the
         # whole batch on a transient failure. Logged so ops can spot

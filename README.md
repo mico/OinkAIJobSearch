@@ -4,11 +4,11 @@
 
 # Oink — AI Job Search in Telegram
 
-**Oink scrapes 25+ sources, scores every posting against your resume with Claude, and pushes only the real matches to your Telegram — each with a hiring contact and one-tap tracking.**
+**Oink scrapes 25+ sources, scores every posting against your resume with Codex, and pushes only the real matches to your Telegram — each with a hiring contact and one-tap tracking.**
 
 [![Live bot](https://img.shields.io/badge/Telegram-try_the_live_bot-26A5E4?logo=telegram&logoColor=white)](https://t.me/job_search_everyday_bot)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](#setup-self-hosting)
-[![Powered by Claude](https://img.shields.io/badge/AI-Claude-D97757)](https://docs.claude.com/claude-code)
+[![Powered by Codex](https://img.shields.io/badge/AI-Codex-412991)](https://developers.openai.com/codex/cli)
 [![Apify Actors](https://img.shields.io/badge/API-Apify_Actors-97D700)](#the-scrapers-as-an-api)
 [![License](https://img.shields.io/badge/license-PolyForm_NC-blue)](LICENSE.md)
 
@@ -40,11 +40,11 @@
 </td>
 <td valign="middle">
 
-- **Scrapes 25+ sources** — LinkedIn, HN "Who is Hiring", Wellfound, EURES, ReliefWeb, remote boards, EU tech boards, academic/research boards (full list in `skill/job-search/scripts/sources/`).
-- **Builds your profile with Claude** — from your uploaded resume plus free-text preferences (`/prefs`), rebuilt by Opus on demand.
+- **Scrapes 25+ sources** — LinkedIn, HN "Who is Hiring", Reddit, X, Wellfound, EURES, ReliefWeb, remote boards, EU tech boards, academic/research boards (full list in `skill/job-search/scripts/sources/`).
+- **Builds your profile with Codex** — from your uploaded resume plus free-text preferences (`/prefs`), rebuilt on demand.
 - **Scores every posting with an LLM** — no keyword filters; a scoring prompt weighs each job against your profile, and only matches above your `/minscore` threshold ship.
 - **Delivers each match as a Telegram card** — with a hiring contact and inline buttons to track applications or generate a tailored resume note.
-- **Runs deep market research on request** — `/marketresearch` fans out 10 Opus agents and returns a polished `.docx` report on demand, salaries, and trends for your role + location.
+- **Runs deep market research on request** — `/marketresearch` fans out 10 Codex agents and returns a polished `.docx` report on demand, salaries, and trends for your role + location.
 - **Remembers everything** — applied/skipped roles never reappear; history lives in a local SQLite DB you own.
 
 </td>
@@ -58,7 +58,7 @@
 | 🐷 [**Hosted bot**](https://t.me/job_search_everyday_bot) *(recommend to try)* | `/start` in Telegram, upload CV, done — zero setup, sources maintained for you | Free to try |
 | 🏢 [**oinkjobsearch.com**](https://oinkjobsearch.com) | A managed private instance: uptime, upgrades, and support handled for you | Free to try |
 | 🔌 [**Apify Actors**](#the-scrapers-as-an-api) | Job listings for your own app, without the bot | Price varies by Actor |
-| 🛠️ **Self-host this repo** | Full control: your keys, your data, your prompts — see [Setup](#setup-self-hosting) | Free, only your Claude subscription |
+| 🛠️ **Self-host this repo** | Full control: your keys, your data, your prompts — see [Setup](#setup-self-hosting) | Runs on your model and source accounts |
 
 ## Who it's for
 
@@ -77,23 +77,18 @@ some sources' TOS restrict use to personal job search.
 ## Quick start
 
 ```bash
-git clone https://github.com/Exdenta/OinkAIJobSearch.git && cd OinkAIJobSearch && claude '/setup'
+git clone https://github.com/Exdenta/OinkAIJobSearch.git && cd OinkAIJobSearch
 ```
 
-Then type **`/setup`**. [Claude Code](https://docs.claude.com/claude-code)
-walks you through the rest — dependencies, a free Telegram bot token from
-@BotFather, `.env`, scheduling — and smoke-tests your bot at the end.
-No Claude Code? Follow the manual [Setup](#setup-self-hosting) below.
+Follow [Setup](#setup-self-hosting) below to install dependencies, authenticate
+Codex, configure your Telegram token, and start the bot.
 
 ### What you need
 
 - **Python 3.10+** and the deps in `requirements.txt`
 - **A Telegram bot token** — free, from [@BotFather](https://t.me/BotFather)
-- **Claude Code CLI** — the `claude` binary on PATH, authenticated (a Claude
-  subscription is enough; no API key required). All AI steps — scoring,
-  profile builds, hiring-contact lookup, market research — run through
-  `claude -p`. Without it the bot still scrapes but can't score or
-  personalize.
+- **Codex CLI** — required for every AI feature, authenticated with your
+  ChatGPT account as the same OS user that runs the bot.
 
 ## Setup (self-hosting)
 
@@ -112,6 +107,39 @@ TELEGRAM_BOT_TOKEN=123456789:AAE-your-bot-token-here
 
 No `TELEGRAM_CHAT_ID` needed — users register themselves via `/start`.
 Optional: set `APIFY_TOKEN` to use the configured cloud source backend.
+
+Install Codex and sign in as the **same OS user that runs the bot**:
+
+```bash
+npm install -g @openai/codex
+codex login
+```
+
+Use the ChatGPT sign-in flow. Keep `codex` on the bot's `PATH`, or set
+`OINK_CODEX_BIN` to its absolute path. Optional `OINK_CODEX_MODEL` overrides
+the CLI's default model for all AI features. No provider-selection variables
+or Anthropic API keys are used.
+
+All AI features use this authenticated Codex CLI: automated scoring and audits,
+profile building, resume tailoring, fit analysis, hiring-contact research,
+web discovery/liveness checks, and market research. Relevant résumé text,
+preferences, and job excerpts are sent to OpenAI; research uses native live
+web search. There is no alternate AI-provider fallback.
+[Codex CLI authentication](https://developers.openai.com/codex/auth)
+
+The Apify backend is hybrid: non-AI scrapers run on Apify, while Devex,
+curated-board discovery, and per-user web search always use local Codex
+adapters with the bot user's ChatGPT login. No additional AI-provider keys
+are injected into Apify runs.
+
+Optional desktop-browser fallback requires Playwright and an existing desktop
+Chrome session; enable `chrome_agent_fallback_enabled` in `defaults.py`.
+Start Chrome with `--remote-debugging-port=9222` and an isolated, non-default
+`--user-data-dir`, then sign in to any sites needed in that profile.
+`OINK_CHROME_CDP_URL` defaults to `http://127.0.0.1:9222` and accepts only
+loopback endpoints. The fallback attaches through Chrome CDP, opens/closes
+only its own tab, and never closes Chrome; no extension, MCP, or CLI browser
+controller is required. Keep remote debugging restricted to your own machine.
 
 **3. Start the bot** (long-running process)
 
@@ -200,6 +228,75 @@ digests.
 
 </details>
 
+### Background Reddit and X collection in Chrome
+
+For local self-hosting, the optional extension in `chrome-extension/` reads
+rendered Reddit and X posts on a schedule using your normal Chrome session.
+It does not export cookies or require an X API token. Browser collection
+does **not** grant permission to collect platform data: use it only where the
+platform's terms and your authorization permit it. Captured post text reaches
+the same external AI scoring service as other job listings.
+
+1. Open `chrome://extensions`, enable **Developer mode**, choose **Load
+   unpacked**, and select this repo's `chrome-extension` directory.
+2. Copy the extension ID shown by Chrome. Generate a local pairing token:
+   ```bash
+   .venv/bin/python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+3. Add these to your root `.env`, substituting the actual ID and token:
+   ```dotenv
+   OINK_SOCIAL_BROWSER_ENABLED=1
+   OINK_SOCIAL_BROWSER_EXTENSION_ID=your_32_character_extension_id
+   OINK_SOCIAL_BROWSER_TOKEN=your_generated_token
+   ```
+4. Restart the bot. It starts an authenticated receiver at
+   `http://127.0.0.1:8766`. For collection without the Telegram process, run
+   `.venv/bin/python skill/job-search/scripts/social_browser.py` from the repo
+   root instead. Do not run both receivers on the same port.
+5. Open the extension's **Options**, enter the pairing token, enable
+   collection, and save. Use **Run now** to verify the first cycle; subsequent
+   cycles are automatic. The default interval is two hours.
+6. Enable Reddit and X in Telegram's `/sources`. Enable Oink's continuous
+   search mode above if scoring and Telegram delivery should also run
+   automatically; the extension collects posts but does not trigger searches.
+
+Collection uses `reddit_subreddits`, `x_search_queries`, and `max_per_source`
+from `scripts/defaults.py` (under `skill/job-search/`). It opens inactive tabs
+it owns, reads a bounded number of loaded posts while scrolling, and closes
+those tabs afterward. Reddit's combined feed can omit post bodies; the collector
+then visits those posts' full observed permalinks in owned tabs to read the body,
+without scrolling comments. Detail visits share the bounded run deadline.
+It never closes or navigates your existing tabs.
+Keep Chrome running, the receiver running, and the machine awake; collection
+does not run while the machine sleeps. Log in to Reddit/X normally first if
+the pages require it.
+
+Login walls, CAPTCHAs, and explicit access/rate-limit blocks pause the affected
+source rather than bypassing the restriction. Inspect the extension's per-source
+status, resolve access normally if permitted, then explicitly resume collection.
+Site markup changes can also break extraction. A successful run with zero posts
+does not prove the source has no jobs; only timestamped, identifiable posts
+loaded in the bounded scroll are captured.
+
+With `OINK_SOCIAL_BROWSER_ENABLED=1`, **both** source adapters read the local
+cache and never fall back to paid API/Apify calls, even when the cache is empty.
+The adapters fetch observed external application links through the existing
+SSRF-safe detail transport, including destinations behind X's `t.co` HTTP or
+zero-delay HTML redirects. Blocked or failed detail fetches retain the original
+post; no social API/Apify fallback occurs. Linked descriptions share a
+4,000-character snippet budget with the original post context.
+
+This works with either fetch backend. Posts are persisted separately in
+`state/social_browser.sqlite3`; adapters still apply age and count limits,
+deduplication and AI scoring. Changed posting content refreshes the main job
+record and invalidates its old scores and queued verdicts before rescoring.
+Clearing the browser-mode environment variable and restarting restores the
+original API transports.
+
+After updating extension files, click **Reload** on its card in
+`chrome://extensions` (content fixes require version **1.0.1**), then use
+**Run now** to refresh the collected posts. Restart Oink after Python changes.
+
 ## Bot commands
 
 | Command | Action |
@@ -263,7 +360,7 @@ FindJobs/
 │   └── fetch_fat_roll_pig.py
 └── skill/
     └── job-search/
-        ├── SKILL.md          ← skill definition Claude reads
+        ├── SKILL.md          ← job-search skill definition
         ├── scripts/
         │   ├── search_jobs.py         ← scheduled digest orchestrator
         │   ├── bot.py                 ← long-running Telegram bot
@@ -292,7 +389,7 @@ FindJobs/
 <summary><b>Hiring-contact lookup — how the 👤 line works</b></summary>
 <br>
 
-For every card about to ship, a Claude agent (WebSearch + WebFetch,
+For every card about to ship, a Codex agent (native live web search/open,
 `hiring_contact.py`) hunts for the one person who most plausibly owns the
 opening: the recruiter named on the posting, the talent-acquisition partner
 covering that function and region, the hiring manager, or a founder at a
@@ -305,7 +402,7 @@ card without the block.
 
 Knobs: `HIRING_CONTACT_OFF=1` disables the pass; `HIRING_CONTACT_TIMEOUT_S`
 (default 180), `HIRING_CONTACT_WORKERS` (default 3),
-`HIRING_CONTACT_MODEL` (default sonnet) tune it.
+`OINK_CODEX_MODEL` (Codex default when unset) tune it.
 
 </details>
 
@@ -343,7 +440,7 @@ Prompt-injection hardening: every sub-agent prompt wraps the candidate's
 inputs in opaque-data blocks with an instruction-ignore preamble; the
 user's location input passes through the same
 `safety_check.check_user_input` gate as `/prefs` before it reaches any
-Claude call.
+Codex call.
 
 </details>
 
@@ -441,3 +538,22 @@ or [try the live bot](https://t.me/job_search_everyday_bot) and tell a friend.
 ### SPAC filings on SEC EDGAR
 
 [SPAC Redemptions Scraper](https://apify.com/nomad-agent/spac-redemptions-scraper) follows SPAC IPO, merger, vote and shareholder-redemption filings. The [full guide](docs/actors/spac-redemptions-scraper.md) includes date filters, output examples and a setup skill. Financial values stay unavailable when the filing does not establish them.
+
+## Runtime migration
+
+All application AI features now use the ChatGPT-authenticated Codex CLI.
+Install `@openai/codex` and run `codex login` as the bot's OS user when upgrading.
+Provider-selection settings and the Anthropic Python dependency have been removed;
+`OINK_CODEX_BIN` and `OINK_CODEX_MODEL` apply across all AI features.
+Remove old per-feature `HIRING_CONTACT_MODEL` / `MARKET_RESEARCH_MODEL` overrides;
+use `OINK_CODEX_MODEL` instead. For existing backend overrides, replace the
+`claude` value with `codex` in `CURATED_BOARDS_BACKEND` and `LIVENESS_BACKEND`,
+and rename forced-chat configuration to `LIVENESS_CODEX_CHAT_IDS`.
+Custom two-pass scoring defaults should use `ai_rescore_timeout_s` and
+`ai_rescore_max_jobs_per_call` instead of the former `sonnet`-named keys.
+Onboarding translation, free-text preference extraction, and teaser-job selection
+also run through Codex; translation retains its cache and fail-open behavior.
+Historical telemetry keeps its existing `claude_calls` table name so stored
+usage remains readable; new calls identify Codex. Token usage is measured, but
+ChatGPT subscription dollar billing is unavailable and is not estimated from
+legacy Anthropic model prices.
