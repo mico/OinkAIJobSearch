@@ -175,7 +175,9 @@ def test_apify_backend_runs_local_only_sources(monkeypatch, enabled, expected):
     for key in ("reddit", "x_twitter"):
         job = Job(key, key, "Role", key, "", "https://example.org", "")
         monkeypatch.setitem(search_jobs.SOURCES, key, SimpleNamespace(fetch=lambda f, j=job: [j]))
-    jobs, errors = search_jobs._fetch_global({"sources": {"reddit": enabled, "x_twitter": True}}, backend="apify")
+    sources = {k: False for k in search_jobs._LOCAL_ONLY_SOURCES}
+    sources.update(reddit=enabled, x_twitter=True)
+    jobs, errors = search_jobs._fetch_global({"sources": sources}, backend="apify")
     assert {j.source for j in jobs} == expected
     assert errors == []
 

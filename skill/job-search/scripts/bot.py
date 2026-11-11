@@ -581,6 +581,11 @@ _SOURCES_CATALOG: list[tuple[str, str]] = [
     ("ai_jobs_net",     "AI Jobs Net"),
     ("reddit",          "Reddit hiring subreddits"),
     ("x_twitter",       "X (Twitter) hiring posts"),
+    # crypto / web3
+    ("web3_career",        "web3.career"),
+    ("cryptojobslist",     "CryptoJobsList"),
+    ("cryptocurrencyjobs", "Cryptocurrency Jobs"),
+    ("crypto_vc_boards",   "Crypto VC & ecosystem boards"),
     # Spain / EU local + commercial
     ("infojobs",        "InfoJobs (Spain)"),
     ("tecnoempleo",     "Tecnoempleo (Spain tech)"),

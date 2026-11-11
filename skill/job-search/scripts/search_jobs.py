@@ -59,6 +59,8 @@ from sources import (                                      # noqa: E402
     justjoinit, nofluffjobs,
     # Social sources (added 2026-11).
     reddit, x_twitter,
+    # Crypto / web3 boards (added 2026-11-11).
+    web3_career, cryptojobslist, cryptocurrencyjobs, crypto_vc_boards,
 )
 from telemetry import MonitorStore                         # noqa: E402
 from instrumentation import pipeline_run, source_run, error_capture  # noqa: E402
@@ -125,6 +127,10 @@ SOURCES = {
     "nofluffjobs":      nofluffjobs,      # Polish/CEE tech JSON API
     "reddit":           reddit,           # Reddit hiring subreddits (JSON / OAuth)
     "x_twitter":        x_twitter,        # X recent search (API v2 or Apify)
+    "web3_career":        web3_career,        # web3.career listing HTML
+    "cryptojobslist":     cryptojobslist,     # cryptojobslist.com RSS
+    "cryptocurrencyjobs": cryptocurrencyjobs, # cryptocurrencyjobs.co RSS
+    "crypto_vc_boards":   crypto_vc_boards,   # Getro crypto VC/ecosystem boards
     # `linkedin` and `web_search` are PER-USER only (run inside the recipient
     # loop with profile.search_seeds), so they're deliberately absent here.
 }
@@ -563,7 +569,11 @@ _DB_ONLY_SOURCES = frozenset({"devex", "un_careers", "curated_boards"})
 # fetch backend `_fetch_global` runs these locally in addition to
 # `fetch_all_apify` so they work regardless of backend. On the `local`
 # backend they already run via `fetch_all` (they're in SOURCES).
-_LOCAL_ONLY_SOURCES: tuple[str, ...] = ("reddit", "x_twitter")
+_LOCAL_ONLY_SOURCES: tuple[str, ...] = (
+    "reddit", "x_twitter",
+    # Crypto boards: cheap public RSS/HTML, no actor published (2026-11-11).
+    "web3_career", "cryptojobslist", "cryptocurrencyjobs", "crypto_vc_boards",
+)
 
 
 # Adaptive source cooldown (algorithm v2.8 / P4 pipeline overhaul).

@@ -57,7 +57,7 @@ def test_fetch_global_dispatch(monkeypatch):
 
     f = {"apify_cache_ttl_s": 0, "apify_run_timeout_s": 120,
          "apify_workers": 6, "apify_actor_owner": "nomad-agent",
-         "sources": {"reddit": False, "x_twitter": False}}
+         "sources": {k: False for k in search_jobs._LOCAL_ONLY_SOURCES}}
 
     jobs, errs = search_jobs._fetch_global(f, backend="local", db=None, cycle_index=3)
     assert jobs == ["L1", "L2"] and seen["backend"] == "local"
@@ -98,7 +98,7 @@ def test_fetch_global_apify_records_source_runs(monkeypatch):
     store = FakeStore()
     filters = {"apify_cache_ttl_s": 0, "apify_run_timeout_s": 120,
                "apify_workers": 6, "apify_actor_owner": "nomad-agent",
-               "sources": {"reddit": False, "x_twitter": False}}
+               "sources": {k: False for k in search_jobs._LOCAL_ONLY_SOURCES}}
     jobs, errs = search_jobs._fetch_global(
         filters,
         backend="apify",
