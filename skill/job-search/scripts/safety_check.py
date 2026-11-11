@@ -1,14 +1,14 @@
 """Prompt-injection screening for user-supplied preferences text.
 
-The free-form text the user types into /prefs flows into TWO Claude calls:
+The free-form text the user types into /prefs flows into TWO Codex calls:
 
-  1. `profile_builder.build_profile_sync` — the Opus sub-agent reads the
+  1. `profile_builder.build_profile_sync` — the Codex sub-agent reads the
      text alongside the resume and emits a structured JSON profile. The text
      is wrapped in clear delimiters, so injection here tends to show up as
      odd fields rather than as a runaway agent.
 
   2. `sources/web_search.fetch` — the text is foregrounded as "USER'S EXPLICIT
-     REQUEST" in a prompt that drives a Claude sub-agent equipped with
+     REQUEST" in a prompt that drives a Codex sub-agent equipped with
      WebSearch and WebFetch. *This* is the high-stakes path: a successful
      hijack could make the agent ignore its constraints, exfiltrate its
      instructions, or pivot to unrelated tasks while burning the user's tokens.
@@ -20,7 +20,7 @@ So we screen the input at the bot-boundary, before storing it. Two-layer check:
     inst-tags. Zero-cost, catches the bulk of hostile input.
 
   - **AI backstop** (`_ai_verdict`): if the regex didn't fire AND the caller
-    set `deep=True`, we ask a small Claude CLI classifier for a second
+    set `deep=True`, we ask a small Codex CLI classifier for a second
     opinion. Useful for paraphrased attacks ("forget your directives…") that
     a hand-written regex would miss.
 
@@ -45,7 +45,7 @@ import logging
 import re
 from typing import Any
 
-from claude_cli import run_p, extract_assistant_text, parse_json_block
+from codex_cli import extract_assistant_text, parse_json_block
 from instrumentation.wrappers import wrapped_run_p
 import forensic
 
@@ -151,7 +151,7 @@ User input:
 
 
 def _ai_verdict(text: str, timeout_s: int = 30) -> dict[str, Any] | None:
-    """Ask Claude to classify. Returns None on any failure (fail-open is fine
+    """Ask Codex to classify. Returns None on any failure (fail-open is fine
     here because the bot will still run the richer prefs parser, which wraps
     the text in clear delimiters)."""
     prompt = _AI_PROMPT.format(text=text[:1200])

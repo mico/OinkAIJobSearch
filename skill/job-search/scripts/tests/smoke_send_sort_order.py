@@ -10,7 +10,7 @@ Covers:
   2. Equal scores → posted_at DESC tie-break (fresher last).
   3. Equal scores + equal posted_at → SOURCE_TIER tie-break.
   4. ``enrichments=None`` fallback: sort by source tier, posted_at, job_id.
-  5. ``match_score=None`` (Haiku batch failure) — does NOT crash, sinks
+  5. ``match_score=None`` (primary batch failure) — does NOT crash, sinks
      to the bottom of the priority list (sent FIRST under best-last).
   6. Determinism: shuffling inputs yields the identical send order.
   7. Best-last: highest-score job is the FINAL ``send_message`` call.
@@ -223,7 +223,7 @@ def test_no_enrichments_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. match_score=None (Haiku batch failure) sinks
+# 5. match_score=None (primary batch failure) sinks
 # ---------------------------------------------------------------------------
 
 def test_none_score_sinks() -> None:

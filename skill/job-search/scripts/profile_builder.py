@@ -1,7 +1,7 @@
-"""Per-user job-search profile builder (Opus subagent).
+"""Per-user job-search profile builder (Codex subagent).
 
 This module runs on every resume upload and every /prefs change, invokes the
-`claude` CLI with `--model opus` and the prompt in
+`codex` CLI with the configured OINK_CODEX_MODEL (or CLI default) and the prompt in
 `prompts/profile_builder.txt`, validates the returned JSON against our
 schema, and persists it at `users.user_profile` plus a row in
 `profile_builds`.
@@ -9,21 +9,21 @@ schema, and persists it at `users.user_profile` plus a row in
 Design choices, recorded so the next editor doesn't have to reverse-engineer:
 
   • **Debounce.** `/prefs` edits are coalesced with a 60-second timer per
-    user: rapid tweaks → one Opus call at the end of the window. Resume
+    user: rapid tweaks → one Codex call at the end of the window. Resume
     uploads cancel the timer and run immediately (a new CV is a bigger
     signal than a sentence change).
 
   • **Single in-flight per user.** If a build is running, a new trigger
     marks `_pending[chat_id] = latest_inputs` and the in-flight worker
     re-runs itself on completion. Guarantees freshness without
-    parallel double-spend on Opus tokens.
+    parallel double-spend on Codex tokens.
 
   • **Fail soft.** On parse_error / validation_error / timeout / CLI-missing,
     the LIVE profile is left untouched. The user sees a soft-fail Telegram
     message ("couldn't rebuild — your previous profile is still active")
     iff they're online; otherwise silent. The next trigger tries again.
 
-  • **No code-exec surface.** Everything Opus returns is pure JSON,
+  • **No code-exec surface.** Everything Codex returns is pure JSON,
     consumed by typed Python. `profile_schema_validate` enforces the
     allowlist of ATS domains, length caps, enum values, and the
     resume/prefs sha1 match (so a model that fabricates identity fields
@@ -35,13 +35,14 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from claude_cli import run_p, extract_assistant_text, parse_json_block
+from codex_cli import MID_MODEL, extract_assistant_text, parse_json_block
 from instrumentation.wrappers import wrapped_run_p
 import forensic
 
@@ -60,13 +61,13 @@ log = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "opus"
-# Opus profile-build latency has crept up over time (measured `claude_calls`
+DEFAULT_MODEL = MID_MODEL
+# Profile-build latency has crept up over time (measured `claude_calls`
 # for caller='profile_builder': ~10-25s in May → 130-290s by late June; a
 # 2026-06-24 resume_upload rebuild for chat 433775883 took 287.8s). The old
 # 180s ceiling timed out outright, and even a 300s cap cleared that build by
 # only ~12s. Set to 3000s (operator request 2026-06-24) for generous headroom
-# against the slowest Opus builds — the build runs async on its own daemon
+# against the slowest Codex builds — the build runs async on its own daemon
 # thread and a slow success is harmless, so a wide ceiling only matters as a
 # backstop against a genuinely hung CLI. Override via PROFILE_BUILD_TIMEOUT_S.
 DEFAULT_TIMEOUT_S = int(os.environ.get("PROFILE_BUILD_TIMEOUT_S", "3000"))
@@ -104,7 +105,7 @@ _MAX_SEED_PHRASE = 120
 # Lifted from 5 → 10 (P6-T2 2026-05-23): on a single 1h run the
 # continuous searcher only delivers ~0.3% of LinkedIn candidates above
 # the score-≥4 floor, partly because 5 queries × N geos was too narrow
-# a candidate pool. Opus now picks 8-12 queries (primary-stack variants
+# a candidate pool. Codex now picks 8-12 queries (primary-stack variants
 # + secondary-stack + adjacent-role titles + one remote-only variant),
 # and the cross-product still trims to MAX_LINKEDIN_DISPATCHES in
 # `sources/linkedin.py`. Existing 5-query user profiles stay valid —
@@ -116,6 +117,12 @@ _MAX_SEED_PHRASES = 12
 # per-user query path. Prompt asks 3-6; validator allows 6 × 40 chars.
 _MAX_BOARD_KEYWORDS = 6
 _MAX_BOARD_KEYWORD = 40
+# social — X web-search queries + subreddit names for the Reddit/X
+# collectors (rule 24c, added 2026-11-11). Optional block; profiles built
+# earlier fall back to the global DEFAULTS in social_seeds.py.
+_MAX_X_QUERIES = 6
+_MAX_X_QUERY = 300
+_MAX_SUBREDDITS = 10
 
 # Location of the external prompt files.
 #   profile_builder.txt — v3 schema (full structured profile). THE LIVE
@@ -302,6 +309,25 @@ def _validate_boards_seeds(boards: Any) -> list[str]:
     return []
 
 
+def _validate_social_seeds(social: Any) -> list[str]:
+    """Validate the OPTIONAL search_seeds.social block (rule 24c)."""
+    if social is None:
+        return []
+    if not isinstance(social, dict):
+        return ["search_seeds.social must be an object"]
+    qs = social.get("x_queries") or []
+    if not _is_str_list(qs) or not _len_le(qs, _MAX_X_QUERY):
+        return [f"search_seeds.social.x_queries must be strings ≤ {_MAX_X_QUERY} chars"]
+    subs = social.get("subreddits") or []
+    if not _is_str_list(subs):
+        return ["search_seeds.social.subreddits must be a list of strings"]
+    # Wire-format check only: these names are joined into a Reddit URL path.
+    bad = [s for s in subs if not re.fullmatch(r"[A-Za-z0-9_]{1,21}", s)]
+    if bad:
+        return [f"search_seeds.social.subreddits has invalid names: {bad}"]
+    return []
+
+
 def seeds_schema_validate(profile: Any) -> list[str]:
     """Validate the algorithm-v2 seeds-only schema (schema_version=4).
 
@@ -357,6 +383,7 @@ def seeds_schema_validate(profile: Any) -> list[str]:
                 if bad:
                     errs.append(f"ats_domains contains disallowed entries: {bad}")
         errs.extend(_validate_boards_seeds(seeds.get("boards")))
+        errs.extend(_validate_social_seeds(seeds.get("social")))
     return errs
 
 
@@ -511,6 +538,7 @@ def profile_schema_validate(profile: Any) -> list[str]:
             if fn is not None and not isinstance(fn, str):
                 errs.append("focus_notes must be a string")
         errs.extend(_validate_boards_seeds(seeds.get("boards")))
+        errs.extend(_validate_social_seeds(seeds.get("social")))
 
     return errs
 
@@ -520,7 +548,7 @@ def profile_schema_validate(profile: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 # The three v5 location lists. Each accepts city / country / continent /
-# "earth" tokens at any granularity — Haiku reasons about geographic
+# "earth" tokens at any granularity — primary reasons about geographic
 # containment (Madrid ⊂ Spain ⊂ Europe ⊂ Earth) at score time, so the
 # builder must NEVER collapse a coarse token into finer ones.
 _V5_LOCATION_FIELDS = ("remote_locations", "hybrid_locations", "onsite_locations")
@@ -567,7 +595,7 @@ def _normalize_location_preferences(profile: dict[str, Any]) -> dict[str, Any]:
     NOT done here (by design — these would re-introduce the bug v5 fixes):
       * country→city expansion — a "spain" hybrid intent MUST stay "spain"
         so a Madrid hybrid posting passes (Madrid ⊂ Spain).
-      * macro→country enumeration — Haiku reasons about containment, not
+      * macro→country enumeration — primary reasons about containment, not
         token equality, so "europe" must stay "europe".
       * merging or substituting across the three modes — the lists are
         INDEPENDENT (a city in onsite_locations but not hybrid_locations
@@ -664,6 +692,14 @@ def _clip_profile(profile: dict[str, Any]) -> dict[str, Any]:
             boards["keywords"] = bkws[:_MAX_BOARD_KEYWORDS]
             seeds["boards"] = boards
             p["search_seeds"] = seeds
+        social = seeds.get("social")
+        if isinstance(social, dict):
+            for key, cap in (("x_queries", _MAX_X_QUERIES), ("subreddits", _MAX_SUBREDDITS)):
+                vals = social.get(key)
+                if isinstance(vals, list) and len(vals) > cap:
+                    social[key] = vals[:cap]
+                    seeds["social"] = social
+                    p["search_seeds"] = seeds
     return p
 
 
@@ -690,7 +726,7 @@ def build_profile_sync(
     model: str = DEFAULT_MODEL,
     _run_p: Callable = _instrumented_run_p,    # injected in tests
 ) -> BuildResult:
-    """Run one Opus call end-to-end. Returns a BuildResult — never raises.
+    """Run one Codex call end-to-end. Returns a BuildResult — never raises.
 
     Tests inject `_run_p=` with a mock to avoid burning real CLI calls.
     """
@@ -765,7 +801,7 @@ def build_profile_sync(
             )
 
         # Canonicalize the three v5 location lists (lowercase/dedupe/alias,
-        # NO country→city expansion — Haiku does containment reasoning)
+        # NO country→city expansion — primary does containment reasoning)
         # BEFORE validating: the validator's all-lowercase check would
         # otherwise reject messy model output ("Europe"/"USA") that the
         # canonicalizer is specifically meant to clean up.
@@ -1104,7 +1140,7 @@ class ProfileBuilderQueue:
             log.exception("profile_builder: audit-log insert failed for chat=%s", chat_id)
 
         # Persist live profile on success. Preserve the user's current
-        # min_match_score if Opus didn't set one of its own — the ⭐ button
+        # min_match_score if Codex didn't set one of its own — the ⭐ button
         # writes straight to the profile JSON, and we don't want a rebuild
         # to silently clear a manual user setting.
         if result.status == "ok" and result.profile is not None:
@@ -1124,7 +1160,7 @@ class ProfileBuilderQueue:
                         )
                 profile_json = json.dumps(result.profile, ensure_ascii=False)
                 rev = self.db.set_user_profile(chat_id, profile_json)
-                # Mirror Opus-picked enabled_sources into the dedicated
+                # Mirror Codex-picked enabled_sources into the dedicated
                 # DB column so search_jobs can read it without parsing
                 # the profile JSON every run. Bot /sources UI also reads
                 # from the column. Best-effort: a failure here leaves

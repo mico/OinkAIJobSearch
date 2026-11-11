@@ -106,14 +106,14 @@ def _try_chrome_agent_fallback(url: str) -> str:
 
     Tier 3: when the headless Playwright fallback ALSO came back empty on an
     anti-bot status, hand the URL to ``chrome_agent_fetch.fetch_page_text_via_
-    chrome``, which drives the operator's logged-in desktop Chrome (via
-    ``claude -p --chrome`` + the claude-in-chrome MCP). That browser carries
+    chrome``, which reads the operator's logged-in desktop Chrome via local
+    Playwright CDP and uses Codex to extract the main content. That browser carries
     real cookies / a real fingerprint and can clear challenges that a fresh
     headless chromium cannot.
 
     Returns the recovered cleaned body text, or "" when the chrome-agent
     fallback is disabled (the DEFAULT — ``chrome_agent_fallback_enabled`` is
-    False, so NO subprocess is spawned and behavior is identical to today),
+    False, so NO desktop attachment occurs and behavior is identical to today),
     the URL is SSRF-blocked, or nothing came back. NEVER raises — any failure
     here degrades to today's "" result.
     """

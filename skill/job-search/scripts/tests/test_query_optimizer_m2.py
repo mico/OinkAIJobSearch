@@ -1,7 +1,7 @@
 """M2 — closed-loop query tuning: telemetry + reward + optimiser tests.
 
 Covers all four task components against TEMP DBs only (never state/jobs.db)
-and with a MOCKED LLM (never the real `claude -p`):
+and with a MOCKED LLM (never the real `codex -p`):
 
   1. Per-query telemetry write + read (`record_query_run`).
   2. Reward aggregation incl. time decay (`query_yield_window`).

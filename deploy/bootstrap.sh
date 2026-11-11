@@ -99,7 +99,7 @@ fi
 systemctl enable --now caddy.service
 
 # ----- 3. Node.js 20 via NodeSource -------------------------------------
-# Needed for `npm install -g @anthropic-ai/claude-code` below.
+# Needed for `npm install -g @openai/codex` below.
 say "Step 3/9: Node.js ${NODE_MAJOR}"
 need_node=true
 if command -v node >/dev/null 2>&1; then
@@ -113,12 +113,12 @@ if ${need_node}; then
     apt-get install -y --no-install-recommends nodejs
 fi
 
-# ----- 4. Claude CLI ------------------------------------------------------
-say "Step 4/9: Claude CLI"
-if ! command -v claude >/dev/null 2>&1; then
-    npm install -g @anthropic-ai/claude-code
+# ----- 4. Codex CLI -------------------------------------------------------
+say "Step 4/9: Codex CLI"
+if ! command -v codex >/dev/null 2>&1; then
+    npm install -g @openai/codex
 fi
-# Ownership of npm's global prefix is fine — claude is invoked by the
+# Ownership of npm's global prefix is fine — codex is invoked by the
 # oink user via PATH; the binary itself need not be owned by oink.
 
 # ----- 5. oink user + dirs ---------------------------------------------

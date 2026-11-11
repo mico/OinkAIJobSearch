@@ -2,9 +2,7 @@
 
 The public bot is BYO-keys. Two independent cost lines, each on YOUR account:
 
-  * SCORING — runs through the `claude` CLI (your Claude Code subscription /
-    your ANTHROPIC_API_KEY). Cost is yours, paid to Anthropic directly.
-    $0 to this project.
+  * AI — runs through your ChatGPT account using Codex. $0 to this project.
   * SOURCES — when FETCH_BACKEND=apify (the default), the job sources are
     fetched by this project's PUBLISHED Apify actors, run under YOUR
     APIFY_TOKEN against the project's APIFY_ACTOR_OWNER account. You pay Apify
@@ -24,11 +22,14 @@ Exit code 0 = ready; 1 = a REQUIRED check failed.
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 import apify_fetch
+import codex_cli
 
 
 @dataclass
@@ -40,16 +41,14 @@ class Check:
 
 
 def _check_scoring() -> Check:
-    """Scoring needs the `claude` CLI on PATH."""
-    claude_ok = shutil.which("claude") is not None
-    if claude_ok:
-        where = shutil.which("claude")
-        return Check("scoring", True, True, f"`claude` CLI found at {where}")
-    return Check(
-        "scoring", False, True,
-        "`claude` CLI not on PATH. Install Claude Code and log in "
-        "(https://claude.com/claude-code).",
-    )
+    """All AI features require the same Codex executable and ChatGPT login."""
+    where = codex_cli.find_codex()
+    if not where:
+        return Check("scoring", False, True, "Set OINK_CODEX_BIN or put `codex` on PATH.")
+    if not codex_cli.chatgpt_login_active(where):
+        return Check("scoring", False, True, "Run `codex login` with ChatGPT.")
+    return Check("scoring", True, True,
+                 f"`codex` CLI found at {where}, signed in with ChatGPT (all AI features)")
 
 
 def _check_apify(backend: str) -> Check:
@@ -78,7 +77,7 @@ def _ping_actor() -> Check:
     owner = os.environ.get("APIFY_ACTOR_OWNER", apify_fetch.DEFAULT_ACTOR_OWNER)
     _k, jobs, err, secs = apify_fetch.call_actor(
         key, {"max_per_source": 1},
-        token=token, owner=owner, cache_ttl=0, run_timeout=60, anthropic_key=None,
+        token=token, owner=owner, cache_ttl=0, run_timeout=60,
     )
     if err:
         return Check("apify_ping", False, False,
@@ -93,18 +92,18 @@ def gather(*, backend: str | None = None, ping: bool = False) -> dict:
     backend = (backend or os.environ.get("FETCH_BACKEND") or "apify").strip().lower()
     if backend not in ("local", "apify"):
         backend = "apify"
+    provider = "codex"
     checks = [_check_scoring(), _check_apify(backend)]
     if ping and backend == "apify":
         checks.append(_ping_actor())
     ok = all(c.ok for c in checks if c.required)
-    return {"backend": backend, "provider": "claude",
+    return {"backend": backend, "provider": provider,
             "checks": checks, "ok": ok}
 
 
 _MONEY_FLOW = """\
 How the costs flow (everything below runs on YOUR accounts):
-  • Scoring  → your Claude Code subscription / API key. Paid to the model
-               provider directly. $0 to this project.
+  • All AI   → Codex using your ChatGPT account. $0 to this project.
   • Sources  → our published Apify actors, run under your APIFY_TOKEN. You pay
                Apify per run; running our maintained scrapers supports the
                project. Switch off with FETCH_BACKEND=local (free, DIY scraping).
@@ -125,6 +124,7 @@ def render(result: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(Path(__file__).resolve().parents[3] / ".env")
     argv = sys.argv[1:] if argv is None else argv
     ping = "--ping" in argv
     backend = None

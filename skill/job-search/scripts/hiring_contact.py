@@ -1,6 +1,6 @@
 """Hiring-contact lookup — "who to write to" for each job card.
 
-For every job that survived the send prefilter we ask a Claude
+For every job that survived the send prefilter we ask a Codex
 subprocess (WebSearch + WebFetch) to find ONE person currently at the
 hiring company who most plausibly owns the opening — the recruiter who
 posted it, the talent-acquisition partner covering the function/region,
@@ -21,13 +21,13 @@ Design notes
   Errors (CLI missing / timeout / parse failure) are NOT cached —
   transient failures retry on the next send attempt.
 - Lookups fan out on a small thread pool. Precedent for wrapped CLI
-  calls from worker threads is job_enrich's Sonnet batch path
+  calls from worker threads is job_enrich's rescore batch path
   (`forensic.log_step` is thread-safe). DB reads/writes and forensic
   emits stay on the caller's thread.
-- Model defaults to MID_MODEL (sonnet): the task is multi-query person
+- Uses the configured Codex model: the task is multi-query person
   research with a hallucination risk — a wrong person shipped to the
   user is worse than none — and the volume is tiny (only jobs that
-  actually ship get a lookup). Override via HIRING_CONTACT_MODEL.
+  actually ship get a lookup). Override via OINK_CODEX_MODEL.
 - Fail-soft everywhere: any failure means the card ships without a
   contact block. The lookup must never block a send.
 
@@ -35,7 +35,7 @@ Env knobs (read at call time, so flips don't need a bot restart):
   HIRING_CONTACT_OFF=1        disable the feature entirely
   HIRING_CONTACT_TIMEOUT_S    per-lookup budget (default 180)
   HIRING_CONTACT_WORKERS      thread-pool width (default 3)
-  HIRING_CONTACT_MODEL        model alias (default: claude_cli.MID_MODEL)
+  OINK_CODEX_MODEL            Codex model override (otherwise CLI default)
 """
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def find_hiring_contact(
     if timeout_s is None:
         timeout_s = _env_int("HIRING_CONTACT_TIMEOUT_S", 180)
     try:
-        from claude_cli import (
+        from codex_cli import (
             MID_MODEL,
             TOOLS_DENY_SHELL_FS,
             TOOLS_WEB_BOTH,
@@ -154,13 +154,13 @@ def find_hiring_contact(
             parse_json_block,
         )
     except ImportError:
-        return (None, "error:claude_cli_import")
+        return (None, "error:codex_cli_import")
     try:
         from instrumentation.wrappers import wrapped_run_p_with_tools
     except ImportError:
         return (None, "error:wrappers_import")
 
-    model = os.environ.get("HIRING_CONTACT_MODEL", "").strip() or MID_MODEL
+    model = MID_MODEL
     # Same tool posture as the liveness verifier: web tools only, shell
     # and filesystem denied — WebFetch pulls untrusted page content into
     # the agent's context (prompt-injection defense).

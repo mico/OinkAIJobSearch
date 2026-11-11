@@ -1,30 +1,23 @@
-"""Claude CLI cost surrogate — micro-USD per call.
+"""Historical API cost estimates in micro-USD.
 
-The `claude` CLI we shell out to does NOT report token counts back, so
-we estimate. char-count → token-count via a 4 chars/token rule of thumb
-(English mix; understates ~15% on code-heavy prompts), then multiply by
-the published per-Mtok rates. The result is stored as int micro-USD on
-`claude_calls.cost_estimate_us`.
-
-Disclaim it everywhere it surfaces: `surrogate · ±25% · until SDK migration`.
+Codex uses a ChatGPT subscription, not these legacy per-token API rates.
+Unknown/default models have no attributable dollar estimate (stored as zero);
+the operator surface explicitly labels subscription billing as unavailable.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 
-# Rule-of-thumb char→token conversion. 4.0 fits Anthropic's docs for
-# English; raise for code-heavy callers if we ever segment by caller.
+# Historical char-to-token conversion retained for pre-cutover model records.
 _CHARS_PER_TOKEN = 4.0
 
-# REPLACE with current Anthropic public pricing at deploy time.
-# USD per 1,000,000 tokens. None entry is the CLI default — assume opus
-# (pessimistic) so we never under-bill ourselves.
+# Legacy rates only; never apply these to a Codex/default model.
 _PRICES = {
     "haiku":  {"in": 1.00,  "out": 5.00},
     "sonnet": {"in": 3.00,  "out": 15.00},
     "opus":   {"in": 15.00, "out": 75.00},
-    None:     {"in": 15.00, "out": 75.00},
+    None:     {"in": 0.0, "out": 0.0},
 }
 
 
@@ -38,9 +31,8 @@ def estimate_cost_us(
     micro-USD = USD * 1_000_000. So a $0.000123 call returns 123. We
     round to int so storage stays compact and SUM()s exact.
 
-    Unknown model aliases fall back to the `None` entry (opus rates) —
-    same pessimism as the CLI-default path. This keeps cost reports a
-    true ceiling.
+    Unknown/default models return zero: subscription dollar billing cannot
+    be derived from token counts.
     """
     rates = _PRICES.get(model, _PRICES[None])
     p_tok = max(0, int(prompt_chars)) / _CHARS_PER_TOKEN

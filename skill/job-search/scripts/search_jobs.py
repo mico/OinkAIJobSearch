@@ -40,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from dedupe import Job, JobStore, dedupe_cross_source      # noqa: E402
-from db import DB, profile_hash as _profile_hash           # noqa: E402
+from db import DB                                         # noqa: E402
 from defaults import DEFAULTS                              # noqa: E402
 from telegram_client import (  # noqa: E402
     TelegramClient,
@@ -57,6 +57,8 @@ from sources import (                                      # noqa: E402
     builtin, impactpool, devex,
     # EU frontend-focused sources (added 2026-05-06).
     justjoinit, nofluffjobs,
+    # Social sources (added 2026-11).
+    reddit, x_twitter,
 )
 from telemetry import MonitorStore                         # noqa: E402
 from instrumentation import pipeline_run, source_run, error_capture  # noqa: E402
@@ -72,6 +74,7 @@ from job_enrich import (                                   # noqa: E402
     enrich_jobs_ai,
     by_job_id,
     reanalyze_scoring_ai,
+    scoring_profile_hash,
 )
 from user_profile import (                                 # noqa: E402
     profile_from_json,
@@ -117,9 +120,11 @@ SOURCES = {
     "wttj":             wttj,             # Welcome to the Jungle Algolia
     "builtin":          builtin,          # US tech HTML
     "impactpool":       impactpool,       # UN/NGO HTML (researcher-friendly)
-    "devex":            devex,            # International dev (Claude CLI)
+    "devex":            devex,            # International dev (Codex CLI)
     "justjoinit":       justjoinit,       # Polish/CEE tech JSON API
     "nofluffjobs":      nofluffjobs,      # Polish/CEE tech JSON API
+    "reddit":           reddit,           # Reddit hiring subreddits (JSON / OAuth)
+    "x_twitter":        x_twitter,        # X recent search (API v2 or Apify)
     # `linkedin` and `web_search` are PER-USER only (run inside the recipient
     # loop with profile.search_seeds), so they're deliberately absent here.
 }
@@ -491,7 +496,7 @@ def post_filter(jobs: list[Job], filters: dict) -> list[Job]:
     company, seniority, and salary. The product decision is now: AI scoring
     (job_enrich.enrich_jobs_ai) is the single matching gate for every job
     across every source. Per-user profile fields (keywords, title gates,
-    locations, companies, salary) are IGNORED here — Claude reads the user's
+    locations, companies, salary) are IGNORED here — Codex reads the user's
     resume + stated preferences and decides fit holistically.
 
     Left as an identity function (not deleted) so every historical call site
@@ -519,7 +524,7 @@ _CURSOR_AWARE_SOURCES = frozenset({"justjoinit", "nofluffjobs", "builtin"})
 # `search_fetches`, but through per-user dispatch (their `fetch_per_user`
 # entry points), so they don't appear in the cursor-aware set above.
 #
-# Tier 4 adds the three Claude-CLI delegation adapters that never paginate
+# Tier 4 adds the three Codex-CLI delegation adapters that never paginate
 # (`devex`, `un_careers`, and the curated_boards module). The curated module
 # records under PER-SUB-BOARD keys (`remocate` / `wantapply` /
 # `remoterocketship`) — not under `curated_boards` — because the dispatcher
@@ -535,7 +540,7 @@ _CURSOR_AWARE_SOURCES = frozenset({"justjoinit", "nofluffjobs", "builtin"})
 # missing here would be wrongly reset to 'normal' on every run.
 _P2_INSTRUMENTED_SOURCES = frozenset({
     "linkedin", "justjoinit", "nofluffjobs", "builtin", "web_search",
-    # Tier 4 — Claude-CLI delegation adapters (no native pagination).
+    # Tier 4 — Codex-CLI delegation adapters (no native pagination).
     "devex", "un_careers",
     # curated_boards sub-boards — each records + cools down on its own key.
     "remocate", "wantapply", "remoterocketship",
@@ -549,10 +554,16 @@ _CURATED_SUBBOARDS = ("remocate", "wantapply", "remoterocketship")
 
 # Adapters whose `fetch(filters)` accepts a `db=` kwarg for Tier-4
 # novelty recording but DON'T take the cursor (`min_revisit_age_s=`) kwarg
-# that `_CURSOR_AWARE_SOURCES` adapters do. These are the Claude-CLI
+# that `_CURSOR_AWARE_SOURCES` adapters do. These are the Codex-CLI
 # delegation sources: they record one fixed-cell `search_fetches` row per
 # fetch so the cooldown FSM gets a novelty signal, without any page cursor.
 _DB_ONLY_SOURCES = frozenset({"devex", "un_careers", "curated_boards"})
+
+# Global sources with NO published Apify actor. On the default `apify`
+# fetch backend `_fetch_global` runs these locally in addition to
+# `fetch_all_apify` so they work regardless of backend. On the `local`
+# backend they already run via `fetch_all` (they're in SOURCES).
+_LOCAL_ONLY_SOURCES: tuple[str, ...] = ("reddit", "x_twitter")
 
 
 # Adaptive source cooldown (algorithm v2.8 / P4 pipeline overhaul).
@@ -582,7 +593,7 @@ def _maybe_auto_rebuild_profile(
 
     Reads `db.get_skip_events_since_rebuild(chat_id)`. When the counter
     is at or above the threshold, calls `profile_builder.rebuild_profile`
-    synchronously (it's already ~30-60s of Opus time; spawning a thread
+    synchronously (it's already ~30-60s of Codex time; spawning a thread
     just to fire-and-forget would race against the next iteration's
     enrichment, which reads the freshly-written profile). On a
     SUCCESSFUL rebuild (BuildResult.status == 'ok'), zeroes the counter
@@ -936,7 +947,7 @@ def fetch_all(
     Algorithm v2.2: switched from a serial for-loop to a thread pool
     (configurable via `defaults.ai_source_workers`, default 6). Source
     adapters are network-IO bound (HTTP/RSS/JSON gets, occasional
-    Claude CLI subprocess for curated_boards/devex/un_careers/
+    Codex CLI subprocess for curated_boards/devex/un_careers/
     ub_doctoral) so threading scales them well — wall time drops from
     ~11-23 min serial to ~2-4 min for 23 adapters.
 
@@ -1088,6 +1099,23 @@ def fetch_all(
                 errors.append(key)
     return all_jobs, errors
 
+def fetch_local_only(filters, *, store=None, pipeline_run_id=None, db=None):
+    """Run `_LOCAL_ONLY_SOURCES` that are enabled. Returns (jobs, errors)."""
+    jobs = []
+    errors = []
+    for key in _LOCAL_ONLY_SOURCES:
+        if not (filters.get("sources") or {}).get(key, True):
+            continue
+        _, fetched, err = _fetch_one_source(
+            key, SOURCES[key], filters, store=store,
+            pipeline_run_id=pipeline_run_id, db=db,
+        )
+        jobs.extend(fetched)
+        if err is not None:
+            errors.append(key)
+    return jobs, errors
+
+
 
 # Valid fetch backends for `run(fetch_backend=...)`. "apify" = the published
 # Apify actors via `apify_fetch.fetch_all_apify` — the DEFAULT and standard
@@ -1191,6 +1219,11 @@ def _fetch_global(
                         pipeline_run_id,
                         source_key,
                     )
+        local_jobs, local_errors = fetch_local_only(
+            filters, store=store, pipeline_run_id=pipeline_run_id, db=db,
+        )
+        jobs = list(jobs) + local_jobs
+        errors = list(errors) + local_errors
         return jobs, errors
     if backend != "local":
         raise ValueError(f"unknown fetch_backend {backend!r}")
@@ -1247,27 +1280,19 @@ def _emit_subscription_alert(store, tg, provider: str, category: str, detail: st
 
 
 def _maybe_prewarm_subscriptions(store, tg, filters: dict) -> None:
-    """Serially refresh the Claude OAuth token + verify Mistral auth BEFORE the
-    per-user enrich fan-out, and alert the operator on any subscription-level
-    failure (broken/expired creds, exhausted quota).
-
-    The Claude call is load-bearing beyond alerting: it performs the single
-    serial OAuth-token refresh that stops the concurrent enrich workers from
-    racing a rotating refresh token — see ``claude_cli.prewarm_token`` for the
-    full failure story. Never raises.
-    """
+    """Check Codex authentication before parallel AI work; never raises."""
     try:
         if not bool(filters.get("ai_enrich", True)):
-            return  # no claude calls this run — nothing to warm
-        import claude_cli
+            return
+        import codex_cli
 
-        c_cat, c_detail = claude_cli.prewarm_token()
+        c_cat, c_detail = codex_cli.prewarm_token()
         if c_cat in ("auth", "quota", "cli_absent"):
-            _emit_subscription_alert(store, tg, "claude", c_cat, c_detail)
+            _emit_subscription_alert(store, tg, "codex", c_cat, c_detail)
         elif c_cat == "ok":
-            log.info("prewarm: claude OAuth token warm")
+            log.info("prewarm: Codex ChatGPT login ready")
         else:
-            log.warning("prewarm: claude transient (%s) — %s", c_cat, c_detail)
+            log.warning("prewarm: Codex transient (%s) — %s", c_cat, c_detail)
     except Exception:
         log.exception("prewarm: swallowed unexpected error")
 
@@ -1345,6 +1370,7 @@ def run(
         )
     configure_logging("job-search")
     load_env()
+    log.info("AI provider: Codex (all features)")
 
     root = project_root()
     state_dir = root / os.environ.get("STATE_DIR", "state")
@@ -1359,7 +1385,7 @@ def run(
         log.exception("log_ttl: cleanup raised; continuing")
 
     # Operational defaults live in code (defaults.DEFAULTS). Matching is
-    # per-user via the Opus-built profile — there is no global YAML config.
+    # per-user via the Codex-built profile — there is no global YAML config.
     filters = dict(DEFAULTS)
 
     db = DB(db_path)
@@ -1418,6 +1444,18 @@ def run(
             candidate_users = db.users_for_search()
         preselected_users = candidate_users
 
+    # Reddit/X targeting: the profile-generated search_seeds.social block
+    # (union over the users this run serves), DEFAULTS when none has one.
+    # Also narrows the browser-cache read to this user's subreddits.
+    try:
+        import social_seeds
+        filters.update(social_seeds.resolve(
+            db, chat_ids=[only_chat] if only_chat is not None else None,
+            defaults=DEFAULTS,
+        ))
+    except Exception:
+        log.exception("social seed resolution failed; using defaults")
+
     # Per-user board queries for the Apify query-array actors. Resolvable
     # only on a per-user run — the continuous searcher always calls
     # run(only_chat=chat_id), so in production EVERY cycle is per-user.
@@ -1475,10 +1513,8 @@ def run(
 
     tg = TelegramClient(token=token)
 
-    # Serial subscription pre-warm: refresh the Claude OAuth token ONCE (before
-    # enrich_jobs_ai fans out `workers` concurrent `claude -p` calls that would
-    # otherwise race a rotating refresh token) and health-check Mistral. Pages
-    # the operator on a subscription failure. Best-effort; never raises.
+    # Check Codex authentication before concurrent model calls. Best-effort;
+    # subscription failures are reported to the operator without crashing.
     _maybe_prewarm_subscriptions(store, tg, filters)
 
     # ------------------------------------------------------------------
@@ -1542,21 +1578,17 @@ def run(
             quiet = bool(msg_cfg.get("quiet_if_empty"))
             ai_enrich = bool(filters.get("ai_enrich", True))
             enrich_timeout_s = int(filters.get("ai_enrich_timeout_s") or 240)
-            # Sonnet rescore-pass timeout (two-pass mode only). Distinct
-            # from `ai_enrich_timeout_s` because measured Sonnet p95
-            # (408s) is 2.3× Haiku p99 (176s); same cap for both either
-            # over-taxes Haiku or under-taxes Sonnet. Falls back to
-            # `enrich_timeout_s` when the dedicated knob isn't set.
-            sonnet_timeout_s = (
-                int(filters["ai_sonnet_timeout_s"])
-                if filters.get("ai_sonnet_timeout_s")
+            # Dedicated timeout for the optional Codex rescore pass.
+            rescore_timeout_s = (
+                int(filters["ai_rescore_timeout_s"])
+                if filters.get("ai_rescore_timeout_s")
                 else enrich_timeout_s
             )
             global_cap = int(filters.get("max_total") or 0)
             # Default AI match-score floor applied when a user hasn't set their own
             # via the bot's ⭐ button. Because the keyword pre-filter has been removed
             # (AI is now the sole matching gate), we need a non-zero default so score-0
-            # rejects (jobs Claude explicitly flagged as wrong-fit) don't leak through.
+            # rejects (jobs Codex explicitly flagged as wrong-fit) don't leak through.
             # Operators can raise/lower this in defaults.py:ai_min_match_score.
             # Clamp to [0, 5]; 0 disables the default floor.
             try:
@@ -1608,7 +1640,7 @@ def run(
                 # dropping them: enrich_jobs_ai is the single matching gate,
                 # so an empty RESUME block means zero jobs forever. Set HERE,
                 # at the single read point, so every downstream consumer —
-                # enrich_jobs_ai, reanalyze_scoring_ai, _profile_hash — sees
+                # enrich_jobs_ai, reanalyze_scoring_ai, scoring_profile_hash — sees
                 # the same text (a profile rebuild then correctly invalidates
                 # the job_scores cache, exactly like a resume edit).
                 resume_is_profile = False
@@ -1619,7 +1651,7 @@ def run(
                 # preference/veto notes (if any) to prefs_text HERE, at the
                 # single read point, so every downstream consumer in this
                 # user's block — enrich_jobs_ai, reanalyze_scoring_ai, and
-                # _profile_hash below — sees the identical augmented text.
+                # scoring_profile_hash below — sees the identical augmented text.
                 # Augmenting profile_hash's input is intentional: a fresh
                 # digest is a real scoring input, so it correctly
                 # invalidates the per-user job_scores cache just like a
@@ -1652,7 +1684,7 @@ def run(
                 # has an `enabled_sources` list (set by the profile
                 # builder at build time, optionally edited via the
                 # /sources UI), drop pool entries whose source isn't in
-                # the list. Saves Sonnet enrichment tokens on off-family
+                # the list. Saves Codex enrichment tokens on off-family
                 # sources (e.g. ai_jobs_net for a researcher, jobs_ac_uk
                 # for a frontend dev).
                 enabled = db.get_enabled_sources(chat_id)
@@ -1753,11 +1785,8 @@ def run(
                         ) as fctx:
                             with source_run(store, pctx.run_id, "web_search", user_chat_id=chat_id) as ws_sctx:
                                 def _local_web_search():
-                                    # Local CLI web_search: drives a `claude -p`
-                                    # sub-agent with WebSearch. Uses the logged-in
-                                    # subscription, not a BYOK API key. Per-user
-                                    # cursor scope so exploration rounds don't
-                                    # bleed across users.
+                                    # Codex web discovery always runs locally
+                                    # using the operator's ChatGPT login.
                                     return web_search.fetch(
                                         effective,
                                         user_free_text=free_text or None,
@@ -1771,39 +1800,7 @@ def run(
                                         attribution=query_attribution,
                                     ) or []
 
-                                if fetch_backend == "apify":
-                                    # Per-user web_search via the published
-                                    # web-search-scraper actor (BYOK — needs
-                                    # ANTHROPIC_API_KEY; skipped with a logged
-                                    # error otherwise). Stateless like the
-                                    # linkedin actor: no per-user cursor.
-                                    import apify_fetch as _apify_ws
-                                    extra, _ws_errs = _apify_ws.fetch_web_search_apify(
-                                        web_seeds,
-                                        effective,
-                                        free_text=free_text or None,
-                                        cache_ttl=int(effective.get("apify_cache_ttl_s", 0)),
-                                        owner=str(effective.get("apify_actor_owner", "nomad-agent")),
-                                        attribution=query_attribution,
-                                        db=db,
-                                        result_cache_s=int(effective.get("apify_result_cache_s", 0)),
-                                    )
-                                    extra = extra or []
-                                    for _e in _ws_errs:
-                                        log.warning("User %s: web_search-apify: %s", chat_id, _e)
-                                    # The apify actor needs a BYOK Anthropic/Mistral
-                                    # key. When it's absent the actor is skipped and
-                                    # yields nothing — fall back to the local CLI
-                                    # path (subscription-backed) so web_search still
-                                    # produces postings instead of silently 0.
-                                    if not extra and any("skipped (BYOK" in _e for _e in _ws_errs):
-                                        log.info(
-                                            "User %s: web_search-apify skipped (no BYOK key) — falling back to local CLI",
-                                            chat_id,
-                                        )
-                                        extra = _local_web_search()
-                                else:
-                                    extra = _local_web_search()
+                                extra = _local_web_search()
                                 ws_sctx.set_count(len(extra))
                             fctx.set_output({
                                 "raw_count": len(extra),
@@ -1852,7 +1849,7 @@ def run(
                 # NOTE: liveness gate runs at send-time on the few postings
                 # that survive scoring + the ⭐ floor — see telegram_client.
                 # send_per_job_digest. Running it pre-enrich on the full
-                # 500-1000 job pool wasted ~90 minutes of Haiku WebFetch
+                # 500-1000 job pool wasted ~90 minutes of Codex WebFetch
                 # calls for a handful of dead postings — most candidates
                 # are filtered cheaper by score or floor anyway.
 
@@ -1884,26 +1881,26 @@ def run(
                                 two_pass=bool(filters.get("ai_two_pass", False)),
                                 triage_floor=int(filters.get("ai_triage_floor") or 2),
                                 # ai_triage_ceiling=5 (defaults): skip
-                                # Sonnet rescore on Haiku=5 verdicts.
-                                # ai_sonnet_max_jobs_per_call=5
-                                # (defaults): smaller Sonnet batches cap
+                                # rescore rescore on primary=5 verdicts.
+                                # ai_rescore_max_jobs_per_call=5
+                                # (defaults): smaller rescore batches cap
                                 # worst-case per-batch wall time when the
                                 # ~9k-token doctrine + briefs combine to
-                                # stall a Sonnet call past 5 minutes.
+                                # stall a rescore call past 5 minutes.
                                 triage_ceiling=int(filters.get("ai_triage_ceiling") or 6),
-                                sonnet_max_jobs_per_call=(
-                                    int(filters["ai_sonnet_max_jobs_per_call"])
-                                    if filters.get("ai_sonnet_max_jobs_per_call")
+                                rescore_max_jobs_per_call=(
+                                    int(filters["ai_rescore_max_jobs_per_call"])
+                                    if filters.get("ai_rescore_max_jobs_per_call")
                                     else None
                                 ),
-                                # ai_sonnet_timeout_s=300 (defaults):
-                                # tight Sonnet-only cap. On timeout the
+                                # ai_rescore_timeout_s=300 (defaults):
+                                # tight rescore-only cap. On timeout the
                                 # batch is retried at batch_size=1; if
                                 # those single-job calls also time out
-                                # the jobs are dropped (no Haiku
+                                # the jobs are dropped (no primary
                                 # fallback — verdict provenance stays
                                 # honest).
-                                sonnet_timeout_s=sonnet_timeout_s,
+                                rescore_timeout_s=rescore_timeout_s,
                                 workers=int(filters.get("ai_enrich_workers") or 4),
                                 db=db,
                                 chat_id=chat_id,
@@ -2039,7 +2036,7 @@ def run(
                 if user_no_send:
                     user_jobs = alive_floor
                 else:
-                    user_profile_hash = _profile_hash(resume_text, prefs_text)
+                    user_profile_hash = scoring_profile_hash(resume_text, prefs_text)
                     buffer_jobs, flush_now, buffer_depth, buffer_oldest_age = (
                         _decide_buffer_flush(
                             db, chat_id, alive_floor, enrichments_by_job_id,
@@ -2122,7 +2119,7 @@ def run(
                         # the optimiser reads the freshest reward window. It
                         # is cheap on the hold path: the once-per-cadence
                         # gate plus the disabled/no_reward/cadence_skip
-                        # short-circuits prevent redundant Opus calls.
+                        # short-circuits prevent redundant Codex calls.
                         try:
                             _maybe_optimize_queries(
                                 db, store, chat_id, filters,
@@ -2378,9 +2375,9 @@ def run(
 
                 # --- v2.5 audit stage --------------------------------
                 # AFTER the cards have shipped, re-grade the score-≥1
-                # verdicts with a second-opinion model (Opus by default)
+                # verdicts with a second-opinion model (Codex by default)
                 # and persist any disagreements. This catches scoring
-                # drift (Sonnet over- or under-scoring) without blocking
+                # drift (Codex over- or under-scoring) without blocking
                 # the digest. Disagreements land in forensic as
                 # `scoring_audit.review` lines so we can grep for
                 # systematic misses post-hoc and decide whether a
@@ -2411,7 +2408,7 @@ def run(
                                 filters.get("ai_scoring_audit_timeout_s") or enrich_timeout_s
                             )
                             audit_model = str(
-                                filters.get("ai_scoring_audit_model") or "sonnet"
+                                filters.get("ai_scoring_audit_model") or os.environ.get("OINK_CODEX_MODEL") or ""
                             )
                             audit_batch_size = int(
                                 filters.get("ai_scoring_audit_batch_size") or 10
@@ -2423,7 +2420,7 @@ def run(
                                 filters.get("ai_scoring_audit_critic_rounds") or 2
                             )
                             audit_critic_model = str(
-                                filters.get("ai_scoring_audit_critic_model") or "sonnet"
+                                filters.get("ai_scoring_audit_critic_model") or os.environ.get("OINK_CODEX_MODEL") or ""
                             )
                             reviews = reanalyze_scoring_ai(
                                 audit_jobs, ext_enr, resume_text, prefs_text,
@@ -2472,7 +2469,7 @@ def run(
 
                 # Auto profile rebuild (algorithm v2.8 / P4). If the
                 # user has accumulated ≥ K skip-feedback events since
-                # the last rebuild, kick a fresh Opus build now. Runs
+                # the last rebuild, kick a fresh Codex build now. Runs
                 # at most once per iteration per user; on a transient
                 # failure the counter stays and the next iteration
                 # retries. No-send / dry-run paths still fire — the

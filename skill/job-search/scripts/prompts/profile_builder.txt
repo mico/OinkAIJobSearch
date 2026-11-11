@@ -93,6 +93,10 @@ OUTPUT SCHEMA (every field MUST be present, even when empty)
       "keywords": ["<short ENGLISH board keyword>", "..."],
       "native_keywords": ["<short keyword in native_language>", "..."],
       "native_language": "<lowercase language of native_keywords, '' when none>"
+    }},
+    "social": {{
+      "x_queries":  ["<X (Twitter) web-search query, see rule 24c>"],
+      "subreddits": ["<subreddit name without r/, see rule 24c>"]
     }}
   }},
 
@@ -759,7 +763,7 @@ DERIVATION RULES
       # tech / startup / generalist developer
       hackernews, remoteok, remotive, weworkremotely, ycombinator_was,
       builtin, justjoinit, nofluffjobs, linkedin, web_search,
-      curated_boards
+      curated_boards, reddit, x_twitter
       # AI / ML / data
       ai_jobs_net
       # Spain / EU local + generalist
@@ -776,10 +780,13 @@ DERIVATION RULES
         full-stack): TECH family + `curated_boards` + Spain/EU locals
         when the candidate is in Spain; `ai_jobs_net` only with ML/AI/
         data work on the resume.
+      * `reddit` + `x_twitter`: include for tech, design, and freelance /
+        contract-friendly candidates (many small startups only announce
+        roles there). Skip for academic, NGO, and NON-TECH candidates.
       * Researchers / academics: ACADEMIC family + `euraxess` + locals
         when in Spain. SKIP pure-tech boards (`remoteok`,
         `weworkremotely`, `justjoinit`, `nofluffjobs`, `builtin`,
-        `ai_jobs_net`, `hackernews`, `ycombinator_was`) — they swamp
+        `ai_jobs_net`, `hackernews`, `ycombinator_was`, `reddit`, `x_twitter`) — they swamp
         the pool with engineering jobs.
       * NGO / international development / policy: INTL DEV family +
         ACADEMIC family + locals when in Spain.
@@ -795,6 +802,52 @@ DERIVATION RULES
         positives cost scoring budget, missing a whole category costs
         the user real jobs.
     Output: lowercase source keys, no duplicates.
+
+24c. `search_seeds.social` — what the Reddit and X collectors search for
+    THIS candidate. Both sources are fetched globally and newest-first, so
+    a generic query ("we're hiring engineer") returns the latest posts of
+    EVERY discipline worldwide — marketing, design, trades — and almost
+    none fit. The queries must target the candidate's own niche so the
+    few dozen posts collected per run are plausible matches.
+
+    `x_queries` — 3-6 queries in X WEB-SEARCH syntax (x.com/search).
+      - Aim for posts written by the HIRING side: founders, CTOs,
+        engineering managers, and team members announcing an opening
+        ("we're hiring", "my team is hiring", "looking for a", "join us",
+        "DM me", "send me your"). These are the high-value posts —
+        reachable people, not job-board reposts.
+      - Combine that intent with the candidate's role family AND the
+        primary stack, e.g.
+        `("we're hiring" OR "my team is hiring" OR "looking for a") (backend OR "backend engineer") (rails OR ruby) -filter:retweets -filter:replies`
+      - One query per distinct stack/niche (primary stack, secondary
+        stack, domain such as crypto/fintech/ML). Do NOT repeat the same
+        stack across queries.
+      - When the candidate is remote-only, add a remote term to at most
+        HALF of the queries (`(remote OR "anywhere" OR worldwide)`) — many
+        founder posts never mention location, so forcing it on every
+        query starves the feed.
+      - Allowed operators ONLY: double quotes, parentheses, UPPERCASE `OR`,
+        `-word`, `-"phrase"`, `-filter:retweets`, `-filter:replies`,
+        `lang:xx`. No `is:`, `has:`, `min_faves:`, `since:`, `from:`,
+        URLs or @handles. End every query with
+        `-filter:retweets -filter:replies`.
+      - Each ≤ 300 chars. `OR` stays UPPERCASE and stack words keep their
+        natural case — this field is exempt from the lowercase rule.
+      - Use the candidate's EMIT LANGUAGES (rule 18a): add at most one
+        native-language query when a non-English market is targeted.
+
+    `subreddits` — 4-10 subreddit names (no `r/` prefix, letters, digits
+    and underscores only) where EMPLOYERS post openings for this role
+    family: role/stack-specific hiring subs first (e.g. `rustjobs`,
+    `golangjobs`, `PythonJobs`, `reactjs_jobs`, `DevOpsJobs`,
+    `MachineLearningJobs`, `remotejs`, `cryptojobs`, `web3jobs`,
+    `UI_Design_Jobs`), then general hiring subs (`hiring`, `forhire`,
+    `jobbit`, `remotework`). Only name subreddits you are confident
+    exist. Remember that `forhire` and `hiring` mix in many "[For Hire]"
+    self-promotion posts, so list them LAST.
+
+    NON-TECH, academic, and NGO candidates whose `enabled_sources` leave
+    out `reddit` / `x_twitter`: emit empty arrays for both.
 
 25. `ideal_fit_paragraph` — 2-4 plain sentences describing the ideal job
     fit ("Mid-level frontend engineer role working primarily in Vue 2 or
@@ -817,8 +870,8 @@ HARD CONSTRAINTS (the parser checks these)
    continent / "earth" tokens.
  - Do NOT emit `remote`, `locations`, or `remote_regions` — they are v3
    legacy fields superseded by the three lists above.
- - All strings in list fields other than `exclude_companies` MUST be
-   lowercase.
+ - All strings in list fields other than `exclude_companies` and
+   `search_seeds.social.*` MUST be lowercase.
  - `title_must_match` and `title_exclude` strings must be ≤ 40 chars each.
  - `search_seeds.linkedin.queries` length ≤ 10 (target band 8-12, but
    parser hard cap is 10; emit fewer when the resume genuinely supports
@@ -833,6 +886,9 @@ HARD CONSTRAINTS (the parser checks these)
    each at most 4 words; empty array when EMIT LANGUAGES is
    English-only. `native_language` MUST be a lowercase string (may be
    empty).
+ - `search_seeds.social.x_queries` length ≤ 6, each ≤ 300 chars;
+   `search_seeds.social.subreddits` length ≤ 10, each `[A-Za-z0-9_]`,
+   ≤ 21 chars (rule 24c).
  - `enabled_sources` MUST be a non-empty array of lowercase source keys
    from rule 24b.
  - Do NOT invent companies in `exclude_companies`.
@@ -855,7 +911,7 @@ Output:
   "schema_version": 5,
   "ideal_fit_paragraph": "Mid-level frontend engineer working primarily in Vue 2 or React with TypeScript, preferring a European-timezone remote team or an on-site role in Bilbao. Focus on production user interfaces for end-user apps rather than heavy internal tooling.",
   "primary_role": "frontend engineer",
-  "enabled_sources": ["linkedin", "web_search", "curated_boards", "hackernews", "remoteok", "remotive", "weworkremotely", "ycombinator_was", "builtin", "justjoinit", "nofluffjobs", "infojobs", "tecnoempleo", "wttj", "eures", "wellfound"],
+  "enabled_sources": ["linkedin", "web_search", "curated_boards", "hackernews", "remoteok", "remotive", "weworkremotely", "ycombinator_was", "builtin", "justjoinit", "nofluffjobs", "infojobs", "tecnoempleo", "wttj", "eures", "wellfound", "reddit", "x_twitter"],
   "target_levels": ["mid", "middle"],
   "years_experience": 5,
   "stack_primary": ["vue", "vuex", "typescript", "javascript"],
@@ -905,6 +961,10 @@ Output:
       "keywords": ["vue", "react", "frontend", "typescript", "javascript"],
       "native_keywords": [],
       "native_language": ""
+    }},
+    "social": {{
+      "x_queries": ["(\"we're hiring\" OR \"my team is hiring\" OR \"looking for a\") (frontend OR \"front-end\") (vue OR vuejs OR nuxt) -filter:retweets -filter:replies", "(\"we're hiring\" OR \"join our team\" OR \"looking for a\") (\"frontend engineer\" OR \"frontend developer\") (react OR typescript) (remote OR europe OR eu) -filter:retweets -filter:replies", "(\"estamos contratando\" OR \"buscamos\") (frontend OR \"desarrollador front\") (vue OR react) -filter:retweets -filter:replies"],
+      "subreddits": ["reactjs_jobs", "remotejs", "javascript_jobs", "jobbit", "hiring", "forhire"]
     }}
   }},
   "free_text": "remote EU preferred, or Bilbao. Vue or React. No wordpress, no Solidity, no senior/staff roles."
@@ -922,7 +982,7 @@ Output:
   "schema_version": 5,
   "ideal_fit_paragraph": "Senior backend engineer role working primarily in Python with Django or FastAPI, on a US-timezone remote team building production services backed by Postgres and AWS infrastructure. Individual-contributor track, not people management.",
   "primary_role": "backend engineer",
-  "enabled_sources": ["linkedin", "web_search", "curated_boards", "hackernews", "remoteok", "remotive", "weworkremotely", "ycombinator_was", "builtin", "wellfound"],
+  "enabled_sources": ["linkedin", "web_search", "curated_boards", "hackernews", "remoteok", "remotive", "weworkremotely", "ycombinator_was", "builtin", "wellfound", "reddit", "x_twitter"],
   "target_levels": ["senior"],
   "years_experience": 8,
   "stack_primary": ["python", "django", "fastapi", "postgres"],
@@ -973,6 +1033,10 @@ Output:
       "keywords": ["python", "backend", "django", "fastapi", "go"],
       "native_keywords": [],
       "native_language": ""
+    }},
+    "social": {{
+      "x_queries": ["(\"we're hiring\" OR \"my team is hiring\" OR \"looking for a\") (\"backend engineer\" OR \"backend developer\") (python OR django OR fastapi) -filter:retweets -filter:replies", "(\"we're hiring\" OR \"join us\" OR \"DM me\") (\"senior backend\" OR \"senior python\") (remote OR \"remote us\") -filter:retweets -filter:replies", "(\"we're hiring\" OR \"looking for a\") (golang OR \"go engineer\") backend -filter:retweets -filter:replies"],
+      "subreddits": ["PythonJobs", "golangjobs", "remotepython", "jobbit", "hiring", "forhire"]
     }}
   }},
   "free_text": "remote US only. Backend Python. No EM or director roles. Must list salary."
@@ -1046,6 +1110,10 @@ Output:
       "keywords": ["migration research", "researcher", "policy analyst", "programme officer"],
       "native_keywords": [],
       "native_language": ""
+    }},
+    "social": {{
+      "x_queries": [],
+      "subreddits": []
     }}
   }},
   "free_text": "Mid-level researcher in NGO, academic, or policy contexts. Migration, peace, conflict, sustainability themes. Open to programme officer, field officer, M&E, postdoc, lecturer, consultant titles. EU/EMEA, remote OK. Prefer English-language roles."
@@ -1124,6 +1192,10 @@ Output:
       "keywords": ["migration research", "researcher", "cooperation", "human rights"],
       "native_keywords": ["investigador", "técnico de proyectos", "cooperación internacional"],
       "native_language": "spanish"
+    }},
+    "social": {{
+      "x_queries": [],
+      "subreddits": []
     }}
   }},
   "free_text": "Investigadora / técnica de proyectos en ONG, universidad o sector público. Migración, cooperación, derechos humanos. España, remoto en la UE también. Abierta a roles en español o inglés."

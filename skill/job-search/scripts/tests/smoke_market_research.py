@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline smoke test for market_research.py.
 
-Covers every piece that doesn't need the real `claude` CLI:
+Covers every piece that doesn't need the real `codex` CLI:
 
   1. _validate_manager_report — good fixture passes
   2. _validate_manager_report — 6 mutations surface specific error substrings
@@ -19,7 +19,7 @@ Covers every piece that doesn't need the real `claude` CLI:
   9. run_all overall timeout — slow worker + short deadline → failed entries
  10. source dedup — 5 URLs all identical fails validator's "distinct URLs" check
 
-No Telegram, no network, no real Claude CLI. Exits non-zero on any failure.
+No Telegram, no network, no real Codex CLI. Exits non-zero on any failure.
 """
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ SCRIPTS = HERE.parent
 sys.path.insert(0, str(SCRIPTS))
 
 import market_research as mr  # noqa: E402
-import claude_cli  # noqa: E402
 from market_research import (  # noqa: E402
     ResearchRun,
     WORKERS,
@@ -619,56 +618,6 @@ check(all(c == 2 for c in worker_call_counts),
 
 
 # ---------------------------------------------------------------------------
-# 8. run_p_with_tools CLI flag fallback
-# ---------------------------------------------------------------------------
-print("\n8. run_p_with_tools — falls back when CLI rejects tool flags")
-
-
-class _FakeProc:
-    def __init__(self, rc: int, stdout: str, stderr: str) -> None:
-        self.returncode = rc
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-_seen_argvs: list[list[str]] = []
-
-
-def _fake_subprocess_run(cmd, **kwargs):
-    _seen_argvs.append(list(cmd))
-    if len(_seen_argvs) == 1:
-        return _FakeProc(2, "", "error: unrecognized arguments: --allowed-tools")
-    return _FakeProc(0, '{"result": "ok-body"}', "")
-
-
-# Stub shutil.which + subprocess.run on claude_cli.
-_orig_which = claude_cli.shutil.which
-_orig_run = claude_cli.subprocess.run
-claude_cli.shutil.which = lambda name: "/usr/bin/fake-claude"
-claude_cli.subprocess.run = _fake_subprocess_run
-try:
-    out = claude_cli.run_p_with_tools(
-        "prompt",
-        allowed_tools="WebSearch,WebFetch",
-        disallowed_tools="Bash,Edit",
-        model="opus",
-        timeout_s=5,
-    )
-finally:
-    claude_cli.shutil.which = _orig_which
-    claude_cli.subprocess.run = _orig_run
-
-check(out == '{"result": "ok-body"}', f"got fallback stdout (got {out!r})")
-check(len(_seen_argvs) == 2, f"two CLI invocations (got {len(_seen_argvs)})")
-if len(_seen_argvs) == 2:
-    second = _seen_argvs[1]
-    check("--allowed-tools" not in second,
-          f"second argv omits --allowed-tools (got {second})")
-    check("--disallowed-tools" not in second,
-          f"second argv omits --disallowed-tools (got {second})")
-
-
-# ---------------------------------------------------------------------------
 # 9. run_all overall timeout
 # ---------------------------------------------------------------------------
 print("\n9. run_all — overall timeout converts pending workers to failures")
@@ -685,7 +634,7 @@ ok_results, failed = run_all(
     workers=WORKERS,
     concurrency=10,
     overall_timeout_s=0.2,
-    model="opus",
+    model="configured-model",
     _run_worker=_slow_worker,
 )
 check(len(ok_results) == 0, f"no successes within 0.2s (got {list(ok_results)})")

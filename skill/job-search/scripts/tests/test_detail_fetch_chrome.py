@@ -53,7 +53,7 @@ def _install_fake_chrome(monkeypatch, *, text, rec=None):
     """Inject a fake ``chrome_agent_fetch`` module. Returns the call record."""
     rec = rec if rec is not None else {}
 
-    def _fake_page_text(*, url, timeout_s=None, device_id=None):
+    def _fake_page_text(*, url, timeout_s=None):
         rec["called"] = rec.get("called", 0) + 1
         rec["url"] = url
         return text
@@ -137,7 +137,7 @@ def test_chrome_agent_raise_falls_back_to_empty(monkeypatch):
     _stub_safe_request(monkeypatch, _Resp(403))
     _stub_playwright_empty(monkeypatch)
 
-    def _raise(*, url, timeout_s=None, device_id=None):
+    def _raise(*, url, timeout_s=None):
         raise RuntimeError("boom")
 
     fake = types.ModuleType("chrome_agent_fetch")

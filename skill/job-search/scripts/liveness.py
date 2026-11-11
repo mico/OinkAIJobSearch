@@ -3,7 +3,7 @@
 Some sources (LinkedIn, ATS SPAs, web_search) return HTTP 200 even for
 closed postings — the page renders "no longer accepting applications"
 inside the body but the HEAD probe sees a fine response. This module
-runs a Haiku-backed verifier (WebFetch + WebSearch tools) against each
+runs a Codex-backed verifier (native web search/open) against each
 posting BEFORE we score it, so we don't burn enrichment tokens on dead
 listings and so the user never sees a closed posting.
 
@@ -23,8 +23,7 @@ Public API:
 `_web_search_listing_still_open` helper from `telegram_client.py` —
 historically it ran only for `source=web_search` jobs at send time, but
 the same prompt + tool wiring works for any source. Bringing it
-in-process pre-enrich means we filter dead postings BEFORE Haiku/Sonnet
-ever sees them.
+in-process pre-enrich means dead postings never reach the scorer.
 """
 from __future__ import annotations
 
@@ -50,8 +49,8 @@ def verify_listing_open(
 
     Delegates to the long-standing helper in `telegram_client` so we
     keep one source of truth for the prompt + fetch/backend wiring.
-    `chat_id` threads through to the `LIVENESS_CLAUDE_CHAT_IDS` rollback
-    lever (see `telegram_client._liveness_forced_to_claude`).
+    `chat_id` threads through to the `LIVENESS_CODEX_CHAT_IDS` rollback
+    lever (see `telegram_client._liveness_forced_to_codex`).
     """
     try:
         from telegram_client import _web_search_listing_still_open as _check

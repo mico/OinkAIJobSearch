@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Oink Local Social Collector</title>
+  <link rel="stylesheet" href="options.css">
+  <script type="module" src="options.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Oink Local Social Collector</h1>
+      <p>Collect rendered Reddit and X posts into your local job-search cache. Chrome and the local receiver must be running.</p>
+    </header>
+    <section aria-labelledby="connection-heading">
+      <h2 id="connection-heading">Local receiver</h2>
+      <dl>
+        <dt>Fixed receiver</dt><dd><code>http://127.0.0.1:8766</code></dd>
+        <dt>This extension ID</dt><dd><code id="extension-id">Loading…</code></dd>
+      </dl>
+      <p>Configure the bot environment with <code>OINK_SOCIAL_BROWSER_ENABLED=1</code>, <code>OINK_SOCIAL_BROWSER_EXTENSION_ID</code> equal to the ID above, and <code>OINK_SOCIAL_BROWSER_TOKEN</code> equal to the secret below. Restart the bot after changing its environment.</p>
+      <p>The token is stored only in this Chrome profile's local extension storage, not synced. It is sent only to the fixed receiver. No cookies, browsing history, or other tabs are read or exported.</p>
+    </section>
+    <section aria-labelledby="settings-heading">
+      <h2 id="settings-heading">Collection settings</h2>
+      <form id="settings-form">
+        <label for="token">Receiver secret token</label>
+        <input id="token" type="password" autocomplete="new-password" spellcheck="false" maxlength="512" aria-describedby="token-help">
+        <p id="token-help" class="hint">32–512 printable ASCII characters, without spaces. Leave blank to keep an already stored token.</p>
+        <label class="checkbox"><input id="clear-token" type="checkbox"> Remove the stored token and disable collection</label>
+        <label class="checkbox"><input id="enabled" type="checkbox"> Enable unattended collection</label>
+        <label for="interval">Collection interval (minutes)</label>
+        <input id="interval" type="number" min="15" max="1440" step="1" value="120" required>
+        <p class="hint">Default: 120 minutes. Allowed: 15–1440. The first scheduled run is about one minute after enabling; Chrome alarms may be delayed while the computer sleeps.</p>
+        <div class="actions">
+          <button id="save" type="submit">Save settings</button>
+          <button id="run-now" type="button" disabled>Run now</button>
+        </div>
+      </form>
+      <p id="feedback" role="status" aria-live="polite"></p>
+    </section>
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">Collection status</h2>
+      <p id="run-status">Loading…</p>
+      <div id="source-statuses"></div>
+      <p class="hint">Login walls, CAPTCHAs, explicit access blocks, and rate limits pause only the affected source. Resolve the issue manually in a normal site tab, then use its Resume button or re-save settings to resume. The collector does not solve challenges, bypass restrictions, or use undocumented APIs. Sources with an empty configured list are not collected.</p>
+      <p class="hint">Collection opens inactive, temporary tabs and closes only tabs it created. A listing page gets at most three scrolls and about 45 seconds. Missing Reddit bodies are read from captured post permalinks without scrolling comments, while time remains in the ten-minute run. Only structurally complete posts with an observed timestamp are sent; the bot's AI scorer decides relevance.</p>
+    </section>
+  </main>
+</body>
+</html>

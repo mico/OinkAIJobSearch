@@ -182,12 +182,8 @@ def _fake_cli_stdout(url_a: str, url_b: str) -> str:
 
 
 def _patch_cli(monkeypatch, module, stdout: str, attr: str) -> None:
-    """Stub a delegation adapter's Claude wrapper to return canned JSON
-    and force the wrapped-path flag on so we don't fall through to the
-    plain run_p_with_tools branch."""
+    """Stub an instrumented Codex adapter with canned JSON."""
     monkeypatch.setattr(module, attr, lambda *a, **k: stdout, raising=False)
-    if hasattr(module, "_HAS_WRAPPED"):
-        monkeypatch.setattr(module, "_HAS_WRAPPED", True, raising=False)
 
 
 def _suppress_detail_fetch(monkeypatch) -> None:

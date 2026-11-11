@@ -5,7 +5,7 @@ PRECISION and needs SENT jobs to fire — a user with zero sends never auto-
 tunes. This module closes the OTHER loop: it reads the per-query FUNNEL yield
 recorded in the `query_runs` table (fetched → scored → matched_ge4 → queued →
 sent, see telemetry/schema.py) over a recent, time-decayed window and asks an
-Opus call to:
+Codex call to:
 
   * KEEP queries that are productive (high matched_ge4 / sent),
   * PRUNE queries that are dead (0 matched_ge4 over >= K runs), and
@@ -35,7 +35,7 @@ Safety / integration:
     of the skip counter, tracked via an `ops_toggles` marker per user.
   * Never raises into the search loop — every public entry point returns an
     `OptimizeResult` and logs on failure.
-  * Tests inject `_run_p=` (a stub) so the real `claude -p` is never called.
+  * Tests inject `_run_p=` (a stub) so the real `codex -p` is never called.
 """
 from __future__ import annotations
 
@@ -46,14 +46,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import forensic
-from claude_cli import extract_assistant_text, parse_json_block
+from codex_cli import MID_MODEL, extract_assistant_text, parse_json_block
 from instrumentation.wrappers import wrapped_run_p
 
 log = logging.getLogger(__name__)
 
-# Opus is the mutation operator: low-volume, high-leverage, must reason about
+# Codex is the mutation operator: low-volume, high-leverage, must reason about
 # synonyms / translations / adjacent role titles in the candidate's context.
-DEFAULT_MODEL = "opus"
+DEFAULT_MODEL = MID_MODEL
 
 # Hard cap on the LinkedIn query set the optimiser may emit, mirroring
 # `profile_builder._MAX_LINKEDIN_QUERIES` so the merged profile still passes

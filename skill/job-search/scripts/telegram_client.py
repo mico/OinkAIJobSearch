@@ -489,6 +489,11 @@ def _url_is_alive(url: str, timeout_s: float = URL_VALIDATION_TIMEOUT_S) -> tupl
         # confirmed 3 LinkedIn 429s where the body was a real listing page.
         if code in (401, 403, 429) and "linkedin.com" in (url or "").lower():
             return (True, f"linkedin_anti_bot_{code}")
+        _host = (urlparse(url).hostname or "").lower()
+        if code in (401, 403, 429) and any(
+            _host == h or _host.endswith("." + h) for h in ("reddit.com", "x.com", "twitter.com")
+        ):
+            return (True, f"social_anti_bot_{code}")
 
         # 2) Server rejected HEAD — retry with a tiny ranged GET.
         if code in _HEAD_BLOCKED_STATUSES:
@@ -691,7 +696,7 @@ def _is_within_age_window(
 
 # ---------- Forum / discussion-page URL filter ----------
 #
-# The web_search source (Claude sub-agent doing open-web discovery) sometimes
+# The web_search source (Codex sub-agent doing open-web discovery) sometimes
 # returns URLs pointing at a FORUM or COMMENT THREAD instead of a real job
 # posting — e.g. a Reddit /r/cscareerquestions thread, a Hacker News comments
 # page, a Twitter status, or a github.com/<org>/<repo>/issues/123. Those URLs
@@ -742,8 +747,11 @@ _FORUM_HOST_BLOCKLIST: frozenset[str] = _load_forum_host_blocklist()
 # the host appears in the blocklist. Keep this set tight — anything new we
 # add here MUST guarantee its URLs are real apply targets, not random
 # threads.
+# reddit / x_twitter (2026-11): the post IS the job announcement; URLs are always
+# the post permalink built by the adapter, never arbitrary threads.
 _FORUM_SOURCE_EXEMPT: frozenset[str] = frozenset({
     "hackernews",
+    "reddit", "x_twitter",
 })
 
 # Generic prefix match: any host starting with "forums." (e.g. forums.adobe.com)
@@ -862,7 +870,7 @@ def _url_is_real_posting(url: str, job_source: str) -> tuple[bool, str]:
 
 # ---------- web_search liveness verification (LLM-backed) ----------
 #
-# The web_search source (Claude open-web subagent) periodically surfaces
+# The web_search source (Codex open-web subagent) periodically surfaces
 # stale Ashby/Greenhouse/Lever postings — Google still has them indexed
 # even after the role closed. The HTTP HEAD-based liveness gate above
 # can't catch these: ATS SPAs return 200 with an empty `<title>Jobs</title>`
@@ -874,9 +882,9 @@ def _url_is_real_posting(url: str, job_source: str) -> tuple[bool, str]:
 # closed-set of known ATS soft-404 surrogate patterns (Workable
 # /oops, ?not_found=true, Lever/Greenhouse/Ashby index pages, LinkedIn
 # /jobs/search/ redirects) — see `_url_pattern_is_soft_404`. Hits drop
-# immediately, saving a Claude call.
+# immediately, saving a Codex call.
 #
-# If the URL passes the structural check, we spawn a Claude subprocess
+# If the URL passes the structural check, we spawn a Codex subprocess
 # with WebFetch + WebSearch and ask the agent to decide:
 #   - "open"    — page shows Apply / role is on company's current board.
 #   - "closed"  — page says position closed / not on current board.
@@ -891,7 +899,7 @@ def _url_is_real_posting(url: str, job_source: str) -> tuple[bool, str]:
 WEB_SEARCH_VERIFY_OFF: bool = os.environ.get("WEB_SEARCH_VERIFY_OFF", "1").strip() not in (
     "", "0", "false", "False",
 )
-# Default bumped 90→150 (2026-07): the agentic Claude WebSearch/WebFetch loop
+# Default bumped 90→150 (2026-07): the agentic Codex WebSearch/WebFetch loop
 # and the orchestrated fetch+search path both regularly need >90s on slow
 # ATS/anti-bot pages, and a TimeoutExpired collapses to a None verdict
 # (recorded `cli_missing`) that used to silently drop the posting.
@@ -906,30 +914,30 @@ WEB_SEARCH_SOFT_404_GATE_OFF: bool = os.environ.get(
     "WEB_SEARCH_SOFT_404_GATE_OFF", "",
 ).strip() not in ("", "0", "false", "False")
 
-# ---------- Liveness backend toggle: "claude" (agentic, default) vs
+# ---------- Liveness backend toggle: "codex" (agentic, default) vs
 # "orchestrated" (plain-Python fetch via sources._detail_fetch + ONE
 # single-shot LLM classify call via the "liveness_verify" stage) ----------
 #
 # This is the highest-volume, highest-blast-radius verdict path (runs per
 # posting, per user, every digest cycle) — a wrong verdict silently drops
-# or falsely-passes a real posting for every user. Default stays "claude" (unchanged production
+# or falsely-passes a real posting for every user. Default stays "codex" (unchanged production
 # behavior) until deliberately flipped after a manual verdict-diff check.
-_VALID_LIVENESS_BACKENDS = frozenset({"claude", "orchestrated"})
+_VALID_LIVENESS_BACKENDS = frozenset({"codex", "orchestrated"})
 
 
 def _liveness_backend() -> str:
     raw = (os.environ.get("LIVENESS_BACKEND", "") or "").strip().lower()
-    return raw if raw in _VALID_LIVENESS_BACKENDS else "claude"
+    return raw if raw in _VALID_LIVENESS_BACKENDS else "codex"
 
 
-def _parse_liveness_claude_chat_ids_env() -> set[int]:
-    """Parse LIVENESS_CLAUDE_CHAT_IDS — comma-separated chat_ids forced back
-    onto the "claude" backend even after LIVENESS_BACKEND=orchestrated ships
+def _parse_liveness_codex_chat_ids_env() -> set[int]:
+    """Parse LIVENESS_CODEX_CHAT_IDS — comma-separated chat_ids forced back
+    onto the "codex" backend even after LIVENESS_BACKEND=orchestrated ships
     fleet-wide. Mirrors bot.py's OINK_LOCAL_CHAT_IDS rollback-lever pattern.
-    The "all" sentinel is handled by `_liveness_claude_all_enabled` and
+    The "all" sentinel is handled by `_liveness_codex_all_enabled` and
     yields an empty set here. Unset/blank → empty set. Bad tokens dropped.
     """
-    raw = (os.environ.get("LIVENESS_CLAUDE_CHAT_IDS", "") or "").strip()
+    raw = (os.environ.get("LIVENESS_CODEX_CHAT_IDS", "") or "").strip()
     if raw.lower() == "all":
         return set()
     out: set[int] = set()
@@ -946,25 +954,25 @@ def _parse_liveness_claude_chat_ids_env() -> set[int]:
     return out
 
 
-def _liveness_claude_all_enabled() -> bool:
-    """True when LIVENESS_CLAUDE_CHAT_IDS is the sentinel "all" — emergency
-    fleet-wide rollback to the "claude" backend without touching
+def _liveness_codex_all_enabled() -> bool:
+    """True when LIVENESS_CODEX_CHAT_IDS is the sentinel "all" — emergency
+    fleet-wide rollback to the "codex" backend without touching
     LIVENESS_BACKEND itself."""
-    return (os.environ.get("LIVENESS_CLAUDE_CHAT_IDS", "") or "").strip().lower() == "all"
+    return (os.environ.get("LIVENESS_CODEX_CHAT_IDS", "") or "").strip().lower() == "all"
 
 
-def _liveness_forced_to_claude(chat_id: int | None) -> bool:
-    if _liveness_claude_all_enabled():
+def _liveness_forced_to_codex(chat_id: int | None) -> bool:
+    if _liveness_codex_all_enabled():
         return True
     if chat_id is None:
         return False
-    return int(chat_id) in _parse_liveness_claude_chat_ids_env()
+    return int(chat_id) in _parse_liveness_codex_chat_ids_env()
 
 
 # ---------- Liveness-exempt sources (structural transport exception) ----------
 #
 # Sources whose detail pages CANNOT be liveness-checked by the text-only
-# `claude -p` WebFetch verifier — the markdown conversion strips CSS, so any
+# `codex -p` WebFetch verifier — the markdown conversion strips CSS, so any
 # element hidden via `display:none` leaks into the page text and is misread as
 # live content. euraxess ships a HIDDEN `<div ... style="display:none;"
 # id="expiration">STATUS: EXPIRED</div>` on EVERY job page (unhidden by JS only
@@ -993,8 +1001,12 @@ def _liveness_forced_to_claude(chat_id: int | None) -> bool:
 # euraxess — the text-only verifier can only add false negatives here. (This
 # path first became reachable once the 429→alive fix stopped HN dying at the
 # dead-URL gate; see `_url_is_alive`.)
+#
+# `reddit` / `x_twitter` (2026-11): social posts have no Apply button; apply
+# information is inline. Liveness is covered by the dead-URL gate and the
+# adapter's max_age_hours cutoff, not the ATS-shaped text verifier.
 _LIVENESS_EXEMPT_SOURCES: frozenset[str] = frozenset(
-    {"euraxess", "hackernews"}
+    {"euraxess", "hackernews", "reddit", "x_twitter"}
     | {
         s.strip().lower()
         for s in (os.environ.get("LIVENESS_EXEMPT_SOURCES", "") or "").split(",")
@@ -1248,7 +1260,7 @@ def _title_is_soft_404(title: str | None) -> tuple[bool, str]:
 
 
 # Shared verdict-classification rules — the ACTUAL decision logic, reused
-# byte-for-byte by both the "claude" (agentic WebFetch) and "orchestrated"
+# byte-for-byte by both the "codex" (agentic WebFetch) and "orchestrated"
 # (pre-fetched body handed to a single-shot LLM call) backends. Only the
 # PROCEDURE preamble above this block differs between backends (one says
 # "go fetch it yourself", the other says "here's what was already
@@ -1386,7 +1398,7 @@ def _parse_liveness_verdict(stdout: str | None) -> tuple[bool | None, str]:
     """Shared envelope-unwrap + verdict parse for both backends."""
     if stdout is None:
         return (None, "unknown:cli_unavailable")
-    from claude_cli import extract_assistant_text, parse_json_block
+    from codex_cli import extract_assistant_text, parse_json_block
     data = parse_json_block(extract_assistant_text(stdout))
     if not isinstance(data, dict):
         return (None, "unknown:parse_failed")
@@ -1411,14 +1423,14 @@ def _parse_liveness_verdict(stdout: str | None) -> tuple[bool | None, str]:
 #     Its reason is free-text, so it never matches this closed set.
 # The gate fails OPEN on infrastructure failures (keeping an already-scored
 # job rather than punishing it for our outage) and stays fail-CLOSED on a
-# genuine "unknown" and on "closed". Empirically ~1/3 of Claude-CLI liveness
+# genuine "unknown" and on "closed". Empirically ~1/3 of Codex-CLI liveness
 # calls returned `cli_unavailable`, and because post-scoring candidate sets
 # are tiny (1-5 jobs) a single verifier hiccup zeroed out a user's whole run.
 _LIVENESS_INFRA_REASONS = frozenset({
     "cli_unavailable",     # stdout is None (subprocess crashed / timeout / non-zero exit)
     "parse_failed",        # envelope present but not a JSON object
     "wrappers_import",     # instrumentation.wrappers import failed
-    "claude_cli_import",   # claude_cli import failed
+    "codex_cli_import",   # codex_cli import failed
     "un_api_error",        # UN Careers per-job API: transport / parse / 4xx failure
     "un_import",           # sources.un_careers import failed
 })
@@ -1435,11 +1447,11 @@ def _liveness_reason_is_infra_failure(reason: str) -> bool:
     return tag in _LIVENESS_INFRA_REASONS
 
 
-def _web_search_listing_still_open_claude(
+def _web_search_listing_still_open_codex(
     job: Job, timeout_s: int = WEB_SEARCH_VERIFY_TIMEOUT_S,
 ) -> tuple[bool | None, str]:
     """Decide whether a web_search-sourced posting is still accepting
-    applications, via a Claude agentic subprocess (WebFetch + WebSearch).
+    applications, via a Codex agentic subprocess (WebFetch + WebSearch).
 
     Returns ``(True, "ok")`` if the agent confirms the listing is open,
     ``(False, "closed:<short reason>")`` if the agent says closed, and
@@ -1451,12 +1463,12 @@ def _web_search_listing_still_open_claude(
     if not (job.url or "").strip():
         return (None, "unknown:no_url")
     try:
-        from claude_cli import TOOLS_DENY_SHELL_FS, TOOLS_WEB_BOTH
+        from codex_cli import TOOLS_DENY_SHELL_FS, TOOLS_WEB_BOTH
     except ImportError:
-        return (None, "unknown:claude_cli_import")
+        return (None, "unknown:codex_cli_import")
     # Route through the instrumented wrapper so each verifier call is
     # recorded in `claude_calls` (counters + cost) and gets a forensic
-    # `claude_cli.run_p_with_tools` line. Previously this called the raw
+    # `codex_cli.run_p_with_tools` line. Previously this called the raw
     # `run_p_with_tools` and never appeared in `/stats` or cost reports.
     try:
         from instrumentation.wrappers import wrapped_run_p_with_tools
@@ -1487,18 +1499,18 @@ def _web_search_listing_still_open_claude(
         "  (e.g. <500 chars, just nav chrome and footer) AND the\n"
         "  fallback WebSearch step above is genuinely inconclusive.\n"
     )
-    # v2.3: pin liveness to Haiku. The check is high-volume (one call per
+    # v2.3: pin liveness to primary. The check is high-volume (one call per
     # surviving posting per user per run) and low-complexity (binary
-    # open/closed decision from a single WebFetch). Haiku finishes in
-    # ~10-25s versus Sonnet's 30-90s, and the verdict quality is good
+    # open/closed decision from a single WebFetch). primary finishes in
+    # ~10-25s versus rescore's 30-90s, and the verdict quality is good
     # enough for the open/closed/unknown trichotomy. SMALLEST_MODEL is
-    # the same "haiku" alias the scorer used before v2.1's Sonnet
+    # the same "primary" alias the scorer used before v2.1's rescore
     # promotion.
     try:
-        from claude_cli import SMALLEST_MODEL as _LIVENESS_MODEL
+        from codex_cli import SMALLEST_MODEL as _LIVENESS_MODEL
     except ImportError:
-        _LIVENESS_MODEL = "haiku"
-    # Tool grants standardized via canonical constants in ``claude_cli`` —
+        _LIVENESS_MODEL = None
+    # Tool grants standardized via canonical constants in ``codex_cli`` —
     # comma-separated allow list + explicit deny list for shell/filesystem
     # (prompt-injection defense: WebFetch loads untrusted job-posting HTML
     # whose page content lands directly in the agent's context window).
@@ -1518,7 +1530,7 @@ def _web_search_listing_still_open_claude(
 def _verify_listing_orchestrated(
     job: Job, timeout_s: int = WEB_SEARCH_VERIFY_TIMEOUT_S,
 ) -> tuple[bool | None, str]:
-    """Non-agentic equivalent of `_web_search_listing_still_open_claude`:
+    """Non-agentic equivalent of `_web_search_listing_still_open_codex`:
     fetch the URL ourselves (sources._detail_fetch, with the anti-bot/
     thin-body escalation chain via `min_body_chars`), then ONE single-shot
     LLM call (the "liveness_verify" stage) reusing
@@ -1591,10 +1603,10 @@ def _un_careers_listing_still_open(
 def _web_search_listing_still_open(
     job: Job, timeout_s: int = WEB_SEARCH_VERIFY_TIMEOUT_S, *, chat_id: int | None = None,
 ) -> tuple[bool | None, str]:
-    """Dispatch to the "claude" (default) or "orchestrated" liveness
+    """Dispatch to the "codex" (default) or "orchestrated" liveness
     backend per `LIVENESS_BACKEND` — see `_liveness_backend`. `chat_id`
-    (optional, for the `LIVENESS_CLAUDE_CHAT_IDS` rollback lever) forces
-    this specific chat back onto the "claude" backend even after
+    (optional, for the `LIVENESS_CODEX_CHAT_IDS` rollback lever) forces
+    this specific chat back onto the "codex" backend even after
     `LIVENESS_BACKEND=orchestrated` ships fleet-wide.
     """
     # Source-specific fast path: UN Careers is a JS-only SPA. The text verifier
@@ -1603,9 +1615,9 @@ def _web_search_listing_still_open(
     # — no render, no LLM. Applies regardless of LIVENESS_BACKEND.
     if _is_un_careers_job(job):
         return _un_careers_listing_still_open(job, timeout_s=timeout_s)
-    if _liveness_backend() == "orchestrated" and not _liveness_forced_to_claude(chat_id):
+    if _liveness_backend() == "orchestrated" and not _liveness_forced_to_codex(chat_id):
         return _verify_listing_orchestrated(job, timeout_s=timeout_s)
-    return _web_search_listing_still_open_claude(job, timeout_s=timeout_s)
+    return _web_search_listing_still_open_codex(job, timeout_s=timeout_s)
 
 
 # ---------- MarkdownV2 helpers ----------
@@ -2185,7 +2197,7 @@ def render_suggestions_mdv2(job, plan: dict, max_chars: int = 3500) -> str:
 
     suggestions = plan.get("suggestions") or []
     if not suggestions:
-        lines.append("✨ " + mdv2_escape("Your resume already aligns — no concrete edits suggested."))
+        lines.append("✨ " + mdv2_escape("There are no verified edits to apply."))
     else:
         n = len(suggestions)
         plural = "s" if n != 1 else ""
@@ -2201,8 +2213,8 @@ def render_suggestions_mdv2(job, plan: dict, max_chars: int = 3500) -> str:
                 f"*{i}\\.* *{mdv2_escape(section)}*  ·  {emoji} _{mdv2_escape(change)}_"
             )
 
-            before = (s.get("before") or "").strip()
-            after = (s.get("after") or "").strip()
+            before = " ".join((s.get("before") or "").split())
+            after = " ".join((s.get("after") or "").split())
             why = (s.get("why") or "").strip()
 
             if before:
@@ -2766,7 +2778,7 @@ def prefilter_for_send(
             # B. Pre-LLM structural soft-404 check. Match the FINAL URL
             # (after HEAD redirects) against the closed-set of known ATS
             # surrogate shapes. A hit drops the job WITHOUT spending a
-            # Claude verifier call. The check is operator-disable-able
+            # Codex verifier call. The check is operator-disable-able
             # via WEB_SEARCH_SOFT_404_GATE_OFF=1 for debugging.
             if not WEB_SEARCH_SOFT_404_GATE_OFF:
                 final_url = _resolve_final_url(
@@ -2844,7 +2856,7 @@ def prefilter_for_send(
             # unparseable) is NOT a judgment about the posting — the model
             # never looked. Dropping on it silently loses an already-scored
             # job every time the verifier flakes (empirically ~1/3 of
-            # Claude-CLI calls), and with 1-5 candidates per user that zeroes
+            # verifier calls), and with 1-5 candidates per user that zeroes
             # out whole runs. The dead-URL HTTP probe already ran above, so an
             # obviously-dead URL is gone before we reach here; keeping an
             # infra-failed job is the safer trade.
@@ -2967,7 +2979,7 @@ def send_per_job_digest(
 
     Sort order (best-FIRST):
       Priority when ``enrichments`` is present:
-        1. match_score DESC (5 first; ``None`` is treated as -1 so Haiku
+        1. match_score DESC (5 first; ``None`` is treated as -1 so primary
            batch failures sink to the bottom — they don't crash and don't
            mis-sort).
         2. posted_at DESC (fresher first).

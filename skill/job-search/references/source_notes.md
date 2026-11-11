@@ -11,6 +11,27 @@ Reference material for understanding / debugging each source adapter.
   - The "latest" thread might be a few days old right after the month rolls over — the adapter's `max_age_hours` is softened (×30) for HN so it keeps working.
   - Posts aren't structured; the adapter takes the first 80 chars of the comment as the "title" and the substring before `|` as the "company". Good enough for a digest.
 
+## Reddit
+
+- **Endpoint**: Combined `/r/a+b/new.json` public listing, or `/r/a+b/new` on `oauth.reddit.com`; newest first, cursor-paginated.
+- **Auth**: External Data API access requires Reddit approval. Optional `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` app-only OAuth; falls back to public JSON if token acquisition fails. With `OINK_SOCIAL_BROWSER_ENABLED=1`, reads the extension cache instead and never calls the API.
+- **Rate limits**: At most `reddit_max_pages` (default 3) requests per run, 100 posts per page. Stop on HTTP errors including 429; no retry loop.
+- **Fields**: Post ID, title, `u/author`, permalink, UTC creation time; subreddit, flair, selftext and optional external linked-page body in the snippet.
+- **Gotchas**: Reddit often 403s datacenter IPs without OAuth. Stickied, NSFW and removed posts are excluded structurally; `[For Hire]` posts are left to the scorer (R9) by design. Global on both fetch backends.
+- **Desktop collection**: Load `chrome-extension/` into your signed-in Chrome and pair it with the authenticated loopback receiver; see README setup. Only rendered, timestamped posts are collected. Login/access challenges pause collection; browser access is not permission to scrape or send data to an external scorer.
+- **Body recovery**: The combined browser feed may render legacy cards with unloaded selftext. The extension follows captured full permalinks (including the observed title slug) for missing bodies, reads only that post, and preserves fuller observations at the collection cap. Bare-ID URLs can serve an empty SPA shell in inactive tabs.
+- **Linked descriptions**: Browser-mode fetch also enriches observed external links via the shared SSRF-safe transport. Failed fetches keep the post; changed job content invalidates stale scores and queued verdicts without changing job identity or first-seen history.
+
+## X (Twitter)
+
+- **Endpoint**: `https://api.x.com/2/tweets/search/recent`, or an explicitly configured `X_APIFY_ACTOR` via the shared Apify transport.
+- **Auth**: `X_BEARER_TOKEN` takes precedence; otherwise BOTH `APIFY_TOKEN` + `X_APIFY_ACTOR` are required. No default actor and no network/spending without credentials.
+- **Rate limits**: Official recent search uses paid API credits and allows a maximum 7-day lookback (clamped to 7 days minus one minute). One request per query; stop on 401/403/429.
+- **Fields**: Tweet ID, author handle, full note-tweet text when present, ISO creation time, post permalink and optional external linked-page body.
+- **Gotchas**: Apify actor schemas vary; the adapter supports common tweet-scraper fields and legacy dates. Relevance and self-promotion are handled by scorer R9, not keyword filters. Global on both fetch backends.
+- **Desktop collection**: `OINK_SOCIAL_BROWSER_ENABLED=1` switches this adapter exclusively to the local extension cache, even without X credentials. The extension reads loaded search-result posts in inactive tabs; no cookies are exported and no paid transport fallback occurs. Chrome/receiver must be running and the machine awake.
+- **Linked descriptions**: Expanded links observed in the DOM are preferred. `t.co` HTTP and zero-delay HTML redirects are resolved before fetching the external body; social-thread destinations and loops are excluded. Original post context and linked description remain within 4,000 characters. Failed/blocked destinations are not evidence of a match.
+
 ## RemoteOK (`https://remoteok.com/api`)
 
 - **Endpoint**: Single JSON array at the root URL. The first element is a disclaimer — skip it.
@@ -64,38 +85,39 @@ Opus-built profile get no LinkedIn results.
 
 These three boards publish listings only via HTML — no RSS, no public JSON, and
 Remote Rocketship's real feed is paid. Rather than writing brittle BeautifulSoup
-selectors, `sources/curated_boards.py` shells out to the `claude` CLI once per
-enabled board and asks Claude to fetch the page (via its built-in WebFetch /
-WebSearch tools) and return a strict JSON payload. The result is fed back into
+selectors, `sources/curated_boards.py` shells out to the Codex CLI once per
+enabled board and asks Codex to fetch the page via native live web search/open
+and return a strict JSON payload. The result is fed back into
 the normal pipeline, so downstream filters (`title_must_match`, `title_exclude`,
 dedupe, per-user seen-list) apply as usual.
 
 **Requirements on the machine that runs the cron:**
-- The `claude` CLI is on PATH and already logged in.
+- The `codex` CLI is on PATH (or `OINK_CODEX_BIN` is set), signed in with
+  ChatGPT via `codex login` as the same OS user that runs the bot.
 - Network egress to the three domains.
 
-**Cost:** ~1 Claude prompt per enabled board per run — three at most per day.
+**Usage:** ~1 Codex prompt per enabled board per run — three at most per day.
 
 **Toggles:** `remocate`, `wantapply`, `remoterocketship` under
 `defaults.DEFAULTS["sources"]`. All three are OFF by default.
 `ai_scrape_timeout_s` (default 180) caps each sub-process.
 
 **Failure modes (all silent — logged at WARN/ERROR, pipeline continues):**
-- `claude` CLI missing → board skipped.
+- Codex CLI missing or unauthenticated → board skipped.
 - CLI timed out → board skipped for this run.
 - JSON parse failure → board skipped; raw output head logged.
 
 **Why not direct HTTP scraping?** Tried it; the three boards change markup
 often enough (and ship heavy client-side rendering) that static selectors
-rot within weeks. Delegating to an LLM is more resilient at the cost of
-a few cents per run.
+rot within weeks. Delegating to an LLM is more resilient and uses the
+operator's authenticated ChatGPT account.
 
-## Open-web discovery (AI sub-agent with WebSearch + WebFetch)
+## Open-web discovery (Codex native live web search/open)
 
-`sources/web_search.py` runs a single `claude` CLI invocation per
-orchestrator run that has both WebSearch and WebFetch available. The agent
+`sources/web_search.py` runs a single Codex CLI invocation per
+orchestrator run with native live web search/open enabled. The agent
 forms up to four different queries, picks the most-promising results, and
-uses WebFetch to open each posting's canonical detail page to extract title,
+opens each posting's canonical detail page to extract title,
 company, location, URL, and snippet. Results flow through the same dedupe +
 post-filter + enrichment pipeline as every other source.
 
@@ -106,11 +128,12 @@ smartrecruiters.com), regional job boards, engineering-team blogs, and
 anywhere else a web search can reach.
 
 **Requirements:**
-- `claude` CLI on PATH, logged in.
-- Network egress the agent can use for WebSearch + WebFetch.
+- Codex CLI on PATH (or `OINK_CODEX_BIN` set), signed in with ChatGPT
+  as the bot OS user.
+- Network egress for native live web search/open.
 
-**Cost:** one `claude -p` invocation per run, which internally issues
-several WebSearch and WebFetch calls. Plan for ~60-120 seconds of wall clock.
+**Usage:** one Codex invocation per run, which internally issues
+several web searches/page opens. Plan for ~60-120 seconds of wall clock.
 
 **Toggle:** `sources.web_search` in `defaults.DEFAULTS`. ON by default —
 gated per-user by whether the profile has `search_seeds.web_search` populated

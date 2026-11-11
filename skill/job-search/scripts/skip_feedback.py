@@ -2,7 +2,7 @@
 
 When a user rejects a posting and explains why ("not interested in fintech",
 "hate working with WordPress", "had a bad time at Acme"), we feed that text
-plus the rejected job into Haiku and ask for a SMALL, CONSERVATIVE delta of
+plus the rejected job into primary and ask for a SMALL, CONSERVATIVE delta of
 exclusion tokens to merge into their existing profile. The bot.py layer
 already runs `safety_check` against the user's text before it reaches us,
 so this module trusts its inputs to be non-injection but still wraps them
@@ -10,10 +10,10 @@ as opaque data inside the prompt for defense in depth.
 
 Why a separate module instead of triggering profile_builder?
 ------------------------------------------------------------
-profile_builder.py rebuilds the WHOLE profile via Opus from resume + free-
-text. That's a 10-30s call, costs Opus tokens, and runs the risk of the
+profile_builder.py rebuilds the WHOLE profile via Codex from resume + free-
+text. That's a 10-30s call, costs Codex tokens, and runs the risk of the
 model "moving" other fields the user didn't ask to change. A skip-reason
-feedback signal is narrow ("filter out X going forward") — Haiku is cheap
+feedback signal is narrow ("filter out X going forward") — primary is cheap
 and fast, and we restrict its surgery to the four exclude lists. Other
 fields stay frozen.
 
@@ -34,7 +34,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from claude_cli import (
+from codex_cli import (
     SMALLEST_MODEL,
     extract_assistant_text,
     parse_json_block,
@@ -73,7 +73,7 @@ _MAX_ANTIPATTERN_ADDITIONS = 3
 _MAX_LIST_LEN = 50
 
 # Snippet head we feed into the prompt — enough for the model to reason
-# about role/domain, not so much that we balloon Haiku tokens.
+# about role/domain, not so much that we balloon primary tokens.
 _MAX_SNIPPET_CHARS = 1500
 _MAX_REASON_CHARS = 800
 
@@ -450,7 +450,7 @@ def _merge_excludes(
 def _stub_profile_with_additions(additions: dict[str, list[str]]) -> dict[str, Any]:
     """Build a minimal profile dict carrying only the new excludes — used
     when the user has no profile yet but still gives skip feedback. The
-    next full Opus rebuild will overwrite this stub but preserve the
+    next full Codex rebuild will overwrite this stub but preserve the
     excludes (the builder doesn't blow away `*_exclude*` fields)."""
     return {
         "title_exclude":      list(additions.get("title_excludes") or []),
@@ -520,7 +520,7 @@ def apply_skip_feedback(
     model: str = DEFAULT_MODEL,
     _run_p=None,    # injected in tests
 ) -> dict[str, Any]:
-    """Parse `user_reason` via Haiku, extract exclusion tokens, persist back
+    """Parse `user_reason` via primary, extract exclusion tokens, persist back
     to the user's profile. Returns a dict the UX layer can render directly.
 
     Always returns. Never raises. On any failure (template missing, CLI
@@ -566,7 +566,7 @@ def apply_skip_feedback(
     # Algorithm v2: when the user has a seeds-only profile (schema_v=4),
     # the structured exclude lists this module mutates do not exist.
     # Scoring reads prefs.txt directly and the bot has already appended
-    # the user's reason there before calling us — no Haiku surgery
+    # the user's reason there before calling us — no primary surgery
     # needed. Short-circuit with a generic ack so we don't burn a model
     # call for a no-op.
     if int((profile or {}).get("schema_version") or 0) == 4:
@@ -583,7 +583,7 @@ def apply_skip_feedback(
         )
         return result
 
-    # Empty reason → don't waste a Haiku call.
+    # Empty reason → don't waste a primary call.
     if not user_reason:
         result = _empty_result(_FALLBACK_SUMMARY_NO_EXTRACT)
         forensic.log_step(
@@ -661,7 +661,7 @@ def apply_skip_feedback(
 
     summary = _render_summary(actually_added, model_summary)
 
-    # Structured-intent override: if Haiku extracted nothing AND the
+    # Structured-intent override: if primary extracted nothing AND the
     # reason looks like location/remote/salary/seniority feedback, replace
     # the model's (often jargon-y) explanation with a clear pointer to
     # /prefs. The user gets a UI that tells them where to make the change

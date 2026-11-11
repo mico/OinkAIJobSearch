@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end smoke for every changed surface, scoped to user 169016071.
 
-Tests each function this branch touched. No real Claude CLI. No Telegram
+Tests each function this branch touched. No real Codex CLI. No Telegram
 HTTP. Reads + writes against the live `state/jobs.db` so telemetry rows
 land where the operator can inspect them with sqlite3 / `/runlog` later.
 
@@ -193,14 +193,14 @@ def test_error_capture_rate_limit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. wrapped_run_p (Task 6 cost capture) — stubbed claude_cli, real DB
+# 7. wrapped_run_p (Task 6 cost capture) — stubbed codex_cli, real DB
 # ---------------------------------------------------------------------------
 
 def test_wrapped_run_p_records() -> None:
     section("7. wrapped_run_p writes claude_calls row")
-    # Patch claude_cli.run_p before importing wrappers (which has its own
+    # Patch codex_cli.run_p before importing wrappers (which has its own
     # bound reference). To override, re-bind on the wrappers module too.
-    import claude_cli
+    import codex_cli
     import instrumentation.wrappers as _wrap
     real = _wrap.run_p
 
@@ -213,7 +213,7 @@ def test_wrapped_run_p_records() -> None:
             "smoke169:fit_analyzer",
             "what is my fit for this role?",
             chat_id=USER_CHAT_ID,
-            model="haiku",
+            model="configured-model",
         )
     finally:
         _wrap.run_p = real
@@ -229,9 +229,9 @@ def test_wrapped_run_p_records() -> None:
     conn.close()
     _assert(r is not None, "claude_calls row exists")
     _assert(r["chat_id"] == USER_CHAT_ID, f"chat_id={USER_CHAT_ID} stamped")
-    _assert(r["model"] == "haiku", "model='haiku' stamped")
+    _assert(r["model"] == "configured-model", "configured model stamped")
     _assert(r["status"] == "ok", "status=ok")
-    _assert(r["cost_estimate_us"] > 0, f"cost_estimate_us={r['cost_estimate_us']}")
+    _assert(r["cost_estimate_us"] == 0, "no invented subscription dollar estimate")
 
 
 # ---------------------------------------------------------------------------

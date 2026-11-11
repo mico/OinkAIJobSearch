@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Oink Local Social Collector",
+  "version": "1.0.1",
+  "description": "Collect rendered Reddit and X posts into your local Oink job-search cache.",
+  "minimum_chrome_version": "120",
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": [
+    "https://www.reddit.com/*",
+    "https://old.reddit.com/*",
+    "https://x.com/*",
+    "http://127.0.0.1:8766/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Configure Oink Local Social Collector"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:8766"
+  }
+}

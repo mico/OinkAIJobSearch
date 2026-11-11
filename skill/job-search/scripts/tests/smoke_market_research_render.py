@@ -217,7 +217,7 @@ def _good_run() -> ResearchRun:
         location_used="Berlin",
         resume_sha1="abcdef0123456789" + "0" * 24,
         prefs_sha1="1234abcd" + "0" * 32,
-        model="opus",
+        model="configured-model",
         error=None,
     )
 
@@ -316,7 +316,7 @@ run2 = ResearchRun(
     location_used="Berlin",
     resume_sha1="deadbeef" + "0" * 32,
     prefs_sha1="cafebabe" + "0" * 32,
-    model="opus",
+    model="configured-model",
     error="all workers failed",
 )
 
@@ -437,7 +437,7 @@ run2b = ResearchRun(
     location_used="Berlin, Germany",
     resume_sha1="abcd" + "0" * 36,
     prefs_sha1="9999" + "0" * 36,
-    model="opus",
+    model="configured-model",
     error="manager: timed out after 1500s",
 )
 
@@ -539,7 +539,7 @@ run3 = ResearchRun(
     location_used="",
     resume_sha1="",
     prefs_sha1="",
-    model="opus",
+    model="configured-model",
     error=None,
 )
 

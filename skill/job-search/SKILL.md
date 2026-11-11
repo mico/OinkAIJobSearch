@@ -1,6 +1,6 @@
 ---
 name: job-search
-description: Runs the daily job-alert pipeline. Scrapes LinkedIn (per-user), HackerNews "Who is Hiring", and remote-focused boards; matches each posting against each user's Opus-built profile via a Haiku score gate; deduplicates via SQLite; posts new postings to Telegram with inline buttons (Applied / Not applied / Tailor my resume). Use whenever the user says "run job search", "check for new jobs", or the scheduled task fires.
+description: Runs the daily job-alert pipeline. Scrapes LinkedIn (per-user), HackerNews "Who is Hiring", and remote-focused boards; matches each posting against each user's Codex-built profile via Codex scoring; deduplicates via SQLite; posts new postings to Telegram with inline buttons (Applied / Not applied / Tailor my resume). Use whenever the user says "run job search", "check for new jobs", or the scheduled task fires.
 ---
 
 # job-search skill
@@ -56,7 +56,7 @@ This skill is only responsible for the **scheduled digest**. Don't touch the bot
 
 ## Files you may edit
 
-- `skill/job-search/scripts/defaults.py` when the user asks to change operator-level toggles (sources, timeouts, default score floor, message format). Per-user matching criteria live on the user's profile (`/prefs` and the Opus profile builder) — don't bake them in here.
+- `skill/job-search/scripts/defaults.py` when the user asks to change operator-level toggles (sources, timeouts, default score floor, message format). Per-user matching criteria live on the user's profile (`/prefs` and the Codex profile builder) — don't bake them in here.
 
 ## Files you must NOT modify during a run
 

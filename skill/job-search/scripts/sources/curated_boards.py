@@ -7,9 +7,9 @@ Covers:
 
 None of these publishes a free JSON or RSS feed, and their HTML layouts drift
 often enough that maintaining BeautifulSoup selectors is not worth it. Instead,
-we delegate the fetch-and-extract step to a Claude agent: at run time this
-module shells out to the `claude` CLI with a strict JSON-only prompt, a
-target URL, and an explicit `--allowed-tools WebFetch` grant, and Claude
+we delegate the fetch-and-extract step to a Codex agent: at run time this
+module shells out to the `codex` CLI with a strict JSON-only prompt, a
+target URL, and an explicit `--allowed-tools WebFetch` grant, and Codex
 uses its own WebFetch tool to pull the current listings.
 
 The `--allowed-tools` grant is load-bearing: without it the CLI prompts the
@@ -19,8 +19,8 @@ WebFetch…") instead of the JSON envelope this adapter expects. See the
 2026-05 fix in `sources/un_careers.py` for the same class of bug.
 
 Requirements (on the machine that runs the cron):
-  1. The `claude` CLI on PATH, already logged in (Anthropic account).
-  2. Network egress to the three domains (checked by Claude, not by us).
+  1. The `codex` CLI on PATH, already logged in (ChatGPT account).
+  2. Network egress to the three domains (checked by Codex, not by us).
 
 Fallback behavior:
   - If the CLI is missing → log a warning and return [].
@@ -36,12 +36,11 @@ import logging
 import os
 from typing import Any
 
-from claude_cli import (
+from codex_cli import (
     TOOLS_DENY_SHELL_FS,
     TOOLS_WEB_FETCH_ONLY,
     extract_assistant_text,
     parse_json_block,
-    run_p_with_tools,
 )
 from instrumentation.wrappers import wrapped_run_p, wrapped_run_p_with_tools
 import forensic
@@ -50,17 +49,17 @@ from text_utils import fix_mojibake
 
 log = logging.getLogger(__name__)
 
-# Backend toggle — "claude" (agentic WebFetch subagent, the default) or
+# Backend toggle — "codex" (agentic WebFetch subagent, the default) or
 # "orchestrated" (plain-Python fetch via sources._detail_fetch + ONE
 # single-shot LLM extract call via the "curated_boards_extract" stage).
-# Mirrors sources/web_search.py's WEB_SEARCH_BACKEND toggle. Default "claude" — new control-flow path ships
+# Mirrors sources/web_search.py's WEB_SEARCH_BACKEND toggle. Default "codex" — new control-flow path ships
 # OFF until a manual smoke check confirms parity.
-_VALID_CURATED_BOARDS_BACKENDS = frozenset({"claude", "orchestrated"})
+_VALID_CURATED_BOARDS_BACKENDS = frozenset({"codex", "orchestrated"})
 
 
 def _curated_boards_backend() -> str:
     raw = (os.environ.get("CURATED_BOARDS_BACKEND") or "").strip().lower()
-    return raw if raw in _VALID_CURATED_BOARDS_BACKENDS else "claude"
+    return raw if raw in _VALID_CURATED_BOARDS_BACKENDS else "codex"
 
 # Start URLs — each one is frontend-focused where possible.
 BOARDS: dict[str, str] = {
@@ -71,11 +70,11 @@ BOARDS: dict[str, str] = {
 
 
 # Tool grants for the curated-boards sub-agent. Each board's prompt instructs
-# Claude to ``Use the WebFetch tool to load the URL below`` — without an
+# Codex to ``Use the WebFetch tool to load the URL below`` — without an
 # explicit ``--allowed-tools`` grant the CLI prompts interactively, and in a
 # non-interactive subprocess that prompt becomes a textual "I need
 # permission…" response instead of JSON. We do NOT grant WebSearch: the
-# prompt only ever asks Claude to WebFetch the target URL (and at most one
+# prompt only ever asks Codex to WebFetch the target URL (and at most one
 # "next page" link). Keeping the allow list minimal narrows the attack
 # surface. See sources/un_careers.py / sources/devex.py for the same fix.
 _ALLOWED_TOOLS = TOOLS_WEB_FETCH_ONLY
@@ -84,7 +83,7 @@ _ALLOWED_TOOLS = TOOLS_WEB_FETCH_ONLY
 _DISALLOWED_TOOLS = TOOLS_DENY_SHELL_FS
 
 # The prompt is deliberately strict: it asks for JSON only, gives a clear schema,
-# and embeds the title/location gates so Claude drops obvious noise on its side.
+# and embeds the title/location gates so Codex drops obvious noise on its side.
 _PROMPT = """You are a job-scraping assistant. Use the WebFetch tool to load the URL below,
 follow up to 1 "next page" link if the first page is a category index, and return the
 open frontend-engineering roles as STRICT JSON (no commentary, no code fences).
@@ -232,7 +231,7 @@ def _fetch_listing_text(url: str) -> str:
 
 
 def _scrape_one_orchestrated(board_key: str, url: str, filters: dict, *, db=None) -> list[Job]:
-    """Non-agentic equivalent of `_scrape_one_claude`: fetch via
+    """Non-agentic equivalent of `_scrape_one_codex`: fetch via
     sources._detail_fetch, extract via ONE single-shot LLM call (the
     "curated_boards_extract" stage). Bounded 2nd
     fetch+extract if the model reports a `next_page_url` — deterministic, not
@@ -271,7 +270,7 @@ def _scrape_one_orchestrated(board_key: str, url: str, filters: dict, *, db=None
         return out
 
 
-def _scrape_one_claude(board_key: str, url: str, filters: dict, *, db=None) -> list[Job]:
+def _scrape_one_codex(board_key: str, url: str, filters: dict, *, db=None) -> list[Job]:
     timeout_s = int(filters.get("ai_scrape_timeout_s") or 180)
     cap = int(filters.get("max_per_source") or 10)
 
@@ -282,12 +281,12 @@ def _scrape_one_claude(board_key: str, url: str, filters: dict, *, db=None) -> l
         prompt = _PROMPT.format(url=url)
         # Tag the underlying CLI call with the specific board so claude_calls
         # rolls up per-board cost/elapsed.
-        # Pin to haiku (2026-05-25) — see same fix in devex/web_search.
+        # Pin to primary (2026-05-25) — see same fix in devex/web_search.
         # Use the tool-aware wrapper: the prompt asks for WebFetch, and
         # without an explicit --allowed-tools grant the CLI prompts the
         # user interactively (textual response, never JSON). See the
         # 2026-05 fix in sources/un_careers.py for the same class of bug.
-        from claude_cli import SMALLEST_MODEL as _MODEL
+        from codex_cli import SMALLEST_MODEL as _MODEL
         stdout = wrapped_run_p_with_tools(
             None,
             f"curated_boards:{board_key}",
@@ -353,7 +352,7 @@ def _scrape_one_claude(board_key: str, url: str, filters: dict, *, db=None) -> l
 def _scrape_one(board_key: str, url: str, filters: dict, *, db=None) -> list[Job]:
     if _curated_boards_backend() == "orchestrated":
         return _scrape_one_orchestrated(board_key, url, filters, db=db)
-    return _scrape_one_claude(board_key, url, filters, db=db)
+    return _scrape_one_codex(board_key, url, filters, db=db)
 
 
 def fetch(filters: dict, *, db=None) -> list[Job]:

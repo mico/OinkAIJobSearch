@@ -63,6 +63,8 @@ from telegram_client import (
     progress_dots,
 )
 import pig_stickers as _pigs
+from codex_cli import extract_assistant_text
+from instrumentation.wrappers import wrapped_run_p
 
 log = logging.getLogger(__name__)
 
@@ -159,7 +161,7 @@ _REMOTE_LABELS = {
 # ---------- localization (Telegram language_code) ----------
 #
 # Signups skew ES/RU but the wizard copy is authored in English. We translate
-# the RAW English (before MarkdownV2 escaping) via the small Mistral model,
+# the RAW English (before MarkdownV2 escaping) via the Codex model,
 # cache each string once per language in the ui_translations table, and escape
 # the result at the call site. Everything fails OPEN to English: missing lang,
 # 'en*', empty text, LLM error, or cache error → the exact bytes we ship today.
@@ -184,10 +186,16 @@ Text:
 
 
 def _llm_translate(text: str, lang: str) -> str | None:
-    """One-shot LLM translation of RAW English into `lang`. Disabled in this
-    single-provider build — returns None so the caller keeps English
-    (fail-open, same shape as an LLM failure). Monkeypatched in tests."""
-    return None
+    """Translate raw UI copy with Codex; the caller handles fail-open/cache."""
+    stdout = wrapped_run_p(
+        None, "onboarding_translate",
+        _TRANSLATE_PROMPT.format(lang=lang, text=text),
+        timeout_s=60,
+    )
+    if not stdout:
+        return None
+    translated = extract_assistant_text(stdout).strip()
+    return translated or None
 
 
 def translate(db: DB, text: str, lang: str | None) -> str:
@@ -1122,10 +1130,31 @@ def _extract_json(s: str) -> dict | None:
 
 
 def _llm_parse_answer(text: str, answers: dict[str, Any]) -> dict[str, Any]:
-    """Ask a small model which of {seniority, role, remote, location} the
-    user just stated. Disabled in this single-provider build — returns {}
-    (fail-open: the wizard keeps its button-driven flow)."""
-    return {}
+    """Extract explicitly stated wizard fields, returning {} on AI failure."""
+    try:
+        stdout = wrapped_run_p(
+            None, "onboarding_parse_answer",
+            _FREE_TEXT_PROMPT.format(
+                current=json.dumps(answers, ensure_ascii=False), text=text,
+            ),
+            timeout_s=60,
+        )
+        data = _extract_json(extract_assistant_text(stdout)) if stdout else None
+    except Exception:
+        log.debug("onboarding answer parsing failed", exc_info=True)
+        return {}
+    if not data:
+        return {}
+    captured = {}
+    for key, allowed in (("seniority", _SENIORITY_LABELS), ("remote", _REMOTE_LABELS)):
+        value = data.get(key)
+        if isinstance(value, str) and value in allowed:
+            captured[key] = value
+    for key in ("role", "location"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            captured[key] = value.strip()
+    return captured
 
 
 # LLM prompt for the re-engagement teaser: pick the single most plausible job
@@ -1150,10 +1179,29 @@ pick a broadly appealing, reputable-looking posting. No prose, no markdown.
 
 
 def _pick_teaser_job(answers: dict[str, Any], jobs: list[dict]) -> dict | None:
-    """Pick the single most plausible teaser job. Disabled in this
-    single-provider build — returns None (fail-open: the caller uses the
-    generic nudge copy)."""
-    return None
+    """Ask Codex for one teaser, never inventing or returning an unknown job."""
+    if not jobs:
+        return None
+    try:
+        stdout = wrapped_run_p(
+            None, "onboarding_teaser",
+            _TEASER_PROMPT.format(
+                answers=json.dumps(answers, ensure_ascii=False),
+                jobs="\n".join(
+                    f"{index}: {json.dumps(job, ensure_ascii=False, default=str)}"
+                    for index, job in enumerate(jobs, 1)
+                ),
+            ),
+            timeout_s=60,
+        )
+        data = _extract_json(extract_assistant_text(stdout)) if stdout else None
+    except Exception:
+        log.debug("onboarding teaser selection failed", exc_info=True)
+        return None
+    pick = data.get("pick") if data else None
+    if type(pick) is not int or not 1 <= pick <= len(jobs):
+        return None
+    return jobs[pick - 1]
 
 
 def _teaser_nudge_mdv2(job: dict, *, tr=None) -> str:

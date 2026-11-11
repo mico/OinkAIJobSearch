@@ -2,7 +2,7 @@
 
 Slug: ``devex``. Landing page: https://www.devex.com/jobs/search
 
-Why we delegate to the Claude CLI
+Why we delegate to the Codex CLI
 ---------------------------------
 DevEx serves every public surface (homepage, ``/jobs``, ``/jobs/search``,
 individual ``/jobs/<slug>-<id>`` detail pages, ``/sitemap.xml``,
@@ -34,10 +34,10 @@ Paywall scope (separate from the bot wall):
 
 Maintaining a custom DataDome bypass is not viable (that's the entire point
 of DataDome), so we follow the same delegation pattern as ``un_careers.py``
-and ``curated_boards.py``: shell out to the ``claude`` CLI with WebSearch +
+and ``curated_boards.py``: shell out to the ``codex`` CLI with WebSearch +
 WebFetch granted, and let it use Google site-search to discover the latest
 DevEx job URLs. WebFetch on individual ``devex.com/jobs/...`` pages is
-ALSO DataDome-blocked, so the prompt tells Claude to extract whatever is
+ALSO DataDome-blocked, so the prompt tells Codex to extract whatever is
 visible in the Google snippet (title, employer, location) and skip
 postings whose detail URL it can't recover.
 
@@ -46,7 +46,7 @@ employer + URL, and (best-effort) location and snippet. The downstream fit
 analyzer + the user clicking through fills in the description.
 
 Failure modes (all return ``[]`` and never raise out of ``fetch``):
-  * ``claude`` CLI missing or login expired           -> warning, ``[]``
+  * ``codex`` CLI missing or login expired           -> warning, ``[]``
   * Network failure / WebSearch + WebFetch blocked    -> warning, ``[]``
   * CLI returned non-JSON / unparseable response      -> warning, ``[]``
   * CLI returned ``{"jobs": []}`` (legitimate zero)   -> info,    ``[]``
@@ -66,13 +66,11 @@ import re
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from claude_cli import (
+from codex_cli import (
     TOOLS_DENY_SHELL_FS,
     TOOLS_WEB_BOTH,
     extract_assistant_text,
     parse_json_block,
-    run_p,
-    run_p_with_tools,
 )
 from dedupe import Job
 from text_utils import fix_mojibake
@@ -82,7 +80,7 @@ log = logging.getLogger(__name__)
 UA = {"User-Agent": "FindJobs-Bot/1.0 (+https://github.com/; personal job-alert)"}
 
 # ---------------------------------------------------------------------------
-# Optional integrations: forensic + instrumented Claude CLI wrapper.
+# Optional integrations: forensic + instrumented Codex CLI wrapper.
 #
 # Mirrors the un_careers.py guarding so this module also works in lean
 # checkouts (older clones, isolated test envs) without those modules.
@@ -95,22 +93,17 @@ except Exception:  # ImportError or transitive failure
     _forensic = None  # type: ignore[assignment]
     _HAS_FORENSIC = False
 
-try:  # wrapped_run_p_with_tools (claude_calls + forensic prompt-head capture)
-    from instrumentation.wrappers import wrapped_run_p_with_tools as _wrapped_run_p_with_tools  # type: ignore
-    _HAS_WRAPPED = True
-except Exception:
-    _wrapped_run_p_with_tools = None  # type: ignore[assignment]
-    _HAS_WRAPPED = False
+from instrumentation.wrappers import wrapped_run_p_with_tools as _wrapped_run_p_with_tools
 
 # Tool grants for the DevEx discovery sub-agent. WebSearch is REQUIRED (the
 # whole point — DataDome blocks direct page loads, so we discover URLs via
 # Google ``site:`` queries). WebFetch is granted as a best-effort fallback in
-# case Claude's fetch path bypasses DataDome on a given run; the prompt tells
+# case Codex's fetch path bypasses DataDome on a given run; the prompt tells
 # the agent to back off after one WebFetch failure.
 #
 # Belt-and-suspenders: forbid filesystem/shell so a successful prompt-injection
 # in a future search-result snippet can't escalate. Delegates to the
-# project-wide canonical constants in ``claude_cli``.
+# project-wide canonical constants in ``codex_cli``.
 _ALLOWED_TOOLS = TOOLS_WEB_BOTH
 _DISALLOWED_TOOLS = TOOLS_DENY_SHELL_FS
 
@@ -156,33 +149,11 @@ def _log_forensic(payload: dict[str, Any]) -> None:
         log.debug("forensic.log_step failed for devex.fetch", exc_info=True)
 
 
-def _run_claude(prompt: str, *, timeout_s: int) -> str | None:
-    """Use the instrumented wrapper when available, else plain run_p_with_tools.
-
-    DevEx requires explicit ``WebSearch,WebFetch`` tool grants — without them
-    the sub-agent has no way to discover postings (the DataDome wall blocks
-    every direct request) and just returns ``{"jobs": []}`` after burning
-    context. See ``sources/web_search.py`` and the 2026-04 zero-runs incident
-    on chat 169016071 for the same class of bug.
-    """
-    # Pin to haiku (2026-05-25): without an explicit --model the CLI falls
-    # back to the default (Opus on this account) and a single devex run
-    # routinely exceeds 240s + ARG/IO ceiling, blowing through the 180s
-    # bot timeout. Haiku handles the WebSearch+JSON extraction in ~90s.
-    from claude_cli import SMALLEST_MODEL as _MODEL
-    if _HAS_WRAPPED and _wrapped_run_p_with_tools is not None:
-        try:
-            return _wrapped_run_p_with_tools(  # type: ignore[misc]
-                None, "devex", prompt,
-                allowed_tools=_ALLOWED_TOOLS,
-                disallowed_tools=_DISALLOWED_TOOLS,
-                timeout_s=timeout_s,
-                model=_MODEL,
-            )
-        except Exception:
-            log.exception("devex: wrapped_run_p_with_tools failed; falling back to run_p_with_tools")
-    return run_p_with_tools(
-        prompt,
+def _run_codex(prompt: str, *, timeout_s: int) -> str | None:
+    """Run discovery through the instrumented Codex web transport."""
+    from codex_cli import SMALLEST_MODEL as _MODEL
+    return _wrapped_run_p_with_tools(
+        None, "devex", prompt,
         allowed_tools=_ALLOWED_TOOLS,
         disallowed_tools=_DISALLOWED_TOOLS,
         timeout_s=timeout_s,
@@ -332,7 +303,7 @@ after the JSON object.
 
 # ---------------------------------------------------------------------------
 # Shared helpers — raw-dict → Job, detail-body enrichment, tier-4 recording.
-# Used by the "claude" backend (and, for `_jobs_from_raw`, by the
+# Used by the "codex" backend (and, for `_jobs_from_raw`, by the
 # chrome-agent fallback tier too — it was previously a near-identical
 # inline copy of the primary loop).
 # ---------------------------------------------------------------------------
@@ -411,7 +382,7 @@ def _jobs_from_raw(raw: list[dict], cap: int, *, out: list[Job] | None = None) -
 def _enrich_detail_bodies(out: list[Job]) -> list[Job]:
     """Algorithm v2.2 — Option 4: search-snippet text stops at ~150 chars
     and routinely omits the "Required qualifications" block, which is
-    exactly the signal Sonnet needs to rule out senior-only / US-only /
+    exactly the signal rescore needs to rule out senior-only / US-only /
     Arabic-required postings. Fetch each detail URL inline. (DevEx HTML is
     DataDome-gated for agentic WebFetch, but a plain requests.get with a
     browser UA gets through — see `sources._detail_fetch`.)
@@ -472,8 +443,8 @@ def _record_tier4(out: list[Job], db) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def _fetch_claude(filters: dict, *, db=None) -> list[Job]:
-    """Aggregate DevEx postings via the Claude CLI delegation pattern.
+def _fetch_codex(filters: dict, *, db=None) -> list[Job]:
+    """Aggregate DevEx postings via the Codex CLI delegation pattern.
 
     Parameters mirrored from filters / defaults:
       * ``max_per_source`` — hard cap on returned jobs (default 12).
@@ -515,7 +486,7 @@ def _fetch_claude(filters: dict, *, db=None) -> list[Job]:
         prompt = _PROMPT.format(cap=cap)
 
         try:
-            stdout = _run_claude(prompt, timeout_s=timeout_s)
+            stdout = _run_codex(prompt, timeout_s=timeout_s)
         except Exception as e:
             log.exception("devex: CLI invocation failed: %s", e)
             fctx.set_output({"raw_count": 0, "kept": 0, "reason": "cli_exception"})
@@ -526,7 +497,7 @@ def _fetch_claude(filters: dict, *, db=None) -> list[Job]:
             return []
 
         if stdout is None:
-            log.warning("devex: claude CLI missing or returned None")
+            log.warning("devex: codex CLI missing or returned None")
             fctx.set_output({"raw_count": 0, "kept": 0, "reason": "cli_missing_or_none"})
             _log_forensic({
                 "input": {"cap": cap, "landing": LANDING},
@@ -534,7 +505,7 @@ def _fetch_claude(filters: dict, *, db=None) -> list[Job]:
             })
             return []
         if not stdout.strip():
-            log.warning("devex: claude CLI returned empty stdout")
+            log.warning("devex: codex CLI returned empty stdout")
             fctx.set_output({"raw_count": 0, "kept": 0, "reason": "cli_empty"})
             _log_forensic({
                 "input": {"cap": cap, "landing": LANDING},
@@ -590,7 +561,7 @@ def _fetch_claude(filters: dict, *, db=None) -> list[Job]:
         #
         # This tier is OFF by default (chrome_agent_fallback_enabled): when
         # disabled, fetch_listings_via_chrome returns [] immediately with NO
-        # subprocess spawned, so the observable behavior here is IDENTICAL to
+        # desktop attachment, so the observable behavior here is IDENTICAL to
         # today (zero regression). It NEVER raises; any failure → [].
         if not out:
             try:
@@ -641,7 +612,7 @@ def _fetch_claude(filters: dict, *, db=None) -> list[Job]:
 def fetch(filters: dict, *, db=None) -> list[Job]:
     """Aggregate DevEx postings.
 
-    Agentic WebSearch subagent backend. See `_fetch_claude`'s docstring
+    Agentic WebSearch subagent backend. See `_fetch_codex`'s docstring
     for the full parameter/caveat picture. Never raises.
     """
-    return _fetch_claude(filters, db=db)
+    return _fetch_codex(filters, db=db)

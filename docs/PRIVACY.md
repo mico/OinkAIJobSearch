@@ -59,20 +59,22 @@ Using the Bot means your data passes through these third parties:
 
 - **Telegram** — every message you send to or receive from the Bot
   transits Telegram's servers. See [Telegram's privacy policy](https://telegram.org/privacy).
-- **Anthropic (Claude)** — when you upload a résumé, set preferences, tap
-  "Tailor resume", tap "Analyze fit", or run `/marketresearch`, the Bot
-  sends the relevant excerpts of your résumé, your preferences, and the
-  job posting to Anthropic's Claude API. See [Anthropic's privacy policy](https://www.anthropic.com/privacy).
-  Your résumé is never uploaded to Anthropic *unless* you trigger one of
-  those features.
+- **OpenAI (Codex / ChatGPT)** — all AI features use the Codex CLI signed in
+  with the operator's ChatGPT account. The Bot sends relevant résumé text,
+  profile data, preferences, and job excerpts to OpenAI for profile building,
+  automated job scoring and audits, tailoring, fit analysis, hiring-contact
+  research, web discovery/liveness checks, and market research. Automated
+  processing can happen after onboarding or on scheduled searches without
+  a separate button press for each job. See [OpenAI's privacy policy](https://openai.com/policies/privacy-policy/).
 - **Job-board websites** — LinkedIn, Indeed, Hacker News "Who is Hiring",
   and a set of curated remote-job boards. The Bot retrieves postings from
-  their public search endpoints; it does not send any information about
-  you to them.
-- **Web search** (for `/marketresearch`) — market-research sub-agents
-  perform web searches that include your target location and role keywords
-  (not your name, résumé, or Telegram identifiers) to gather salary and
-  demand information.
+  public search endpoints; searches may include role and location criteria,
+  but the Bot does not upload your résumé files or Telegram identifiers.
+- **Web search** — Codex research, job discovery, hiring-contact lookup, and
+  listing-liveness verification use native live web search/open. Queries can
+  include role, location, company, and posting details derived from your
+  preferences or the relevant job. These queries and fetched pages are
+  processed by OpenAI's web tools and the sites being accessed.
 
 ## How long we keep it
 
@@ -113,11 +115,11 @@ within a few days.
 
 - The server running the Bot is access-controlled and not publicly shared.
 - The database and résumé files are stored on the server's local filesystem;
-  they are not uploaded to any cloud service.
+  relevant extracted content is also sent to OpenAI for the AI features above.
 - The Bot's Telegram token is stored in a local `.env` file and is not
   published.
-- Data sent to Anthropic is transmitted over TLS. Anthropic's handling of
-  that data is governed by the policy linked above.
+- Data sent to OpenAI is transmitted over TLS. OpenAI's handling of
+  that data is governed by the policy linked above and the account's settings.
 
 No service is perfectly secure. If you consider your résumé sensitive, use
 `/cleardata` after you've received the outputs you wanted.

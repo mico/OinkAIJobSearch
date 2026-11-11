@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Tests for curated_boards.py's orchestrated (non-agentic) backend.
 
-Covers the backend toggle (env-var driven, default "claude" unchanged), the
+Covers the backend toggle (env-var driven, default "codex" unchanged), the
 single-fetch happy path, the bounded 2nd-page fetch when the model reports a
 `next_page_url`, and that a thin/empty fetch degrades to [] rather than
-raising. No real network / no real `claude` CLI — `_fetch_listing_text` and
+raising. No real network / no real `codex` CLI — `_fetch_listing_text` and
 `wrapped_run_p` are monkeypatched at module level.
 """
 from __future__ import annotations
@@ -32,34 +32,34 @@ def _envelope(result_obj) -> str:
     return json.dumps({"result": json.dumps(result_obj)})
 
 
-def test_backend_defaults_to_claude():
-    assert cb._curated_boards_backend() == "claude"
+def test_backend_defaults_to_codex():
+    assert cb._curated_boards_backend() == "codex"
 
 
-def test_backend_invalid_value_falls_back_to_claude(monkeypatch):
+def test_backend_invalid_value_falls_back_to_codex(monkeypatch):
     monkeypatch.setenv("CURATED_BOARDS_BACKEND", "bogus")
-    assert cb._curated_boards_backend() == "claude"
+    assert cb._curated_boards_backend() == "codex"
 
 
 def test_dispatcher_routes_to_orchestrated_when_flag_set(monkeypatch):
     monkeypatch.setenv("CURATED_BOARDS_BACKEND", "orchestrated")
-    calls = {"orchestrated": 0, "claude": 0}
+    calls = {"orchestrated": 0, "codex": 0}
     monkeypatch.setattr(cb, "_scrape_one_orchestrated",
                          lambda *a, **k: calls.__setitem__("orchestrated", calls["orchestrated"] + 1) or [])
-    monkeypatch.setattr(cb, "_scrape_one_claude",
-                         lambda *a, **k: calls.__setitem__("claude", calls["claude"] + 1) or [])
+    monkeypatch.setattr(cb, "_scrape_one_codex",
+                         lambda *a, **k: calls.__setitem__("codex", calls["codex"] + 1) or [])
     cb._scrape_one("remocate", "https://x.test", {})
-    assert calls == {"orchestrated": 1, "claude": 0}
+    assert calls == {"orchestrated": 1, "codex": 0}
 
 
-def test_dispatcher_routes_to_claude_by_default(monkeypatch):
-    calls = {"orchestrated": 0, "claude": 0}
+def test_dispatcher_routes_to_codex_by_default(monkeypatch):
+    calls = {"orchestrated": 0, "codex": 0}
     monkeypatch.setattr(cb, "_scrape_one_orchestrated",
                          lambda *a, **k: calls.__setitem__("orchestrated", calls["orchestrated"] + 1) or [])
-    monkeypatch.setattr(cb, "_scrape_one_claude",
-                         lambda *a, **k: calls.__setitem__("claude", calls["claude"] + 1) or [])
+    monkeypatch.setattr(cb, "_scrape_one_codex",
+                         lambda *a, **k: calls.__setitem__("codex", calls["codex"] + 1) or [])
     cb._scrape_one("remocate", "https://x.test", {})
-    assert calls == {"orchestrated": 0, "claude": 1}
+    assert calls == {"orchestrated": 0, "codex": 1}
 
 
 def test_orchestrated_single_page_happy_path(monkeypatch):

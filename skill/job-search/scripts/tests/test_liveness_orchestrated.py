@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Tests for telegram_client.py's orchestrated liveness-verifier backend.
 
-Covers the backend toggle (env-var driven, default "claude" unchanged), the
-LIVENESS_CLAUDE_CHAT_IDS rollback lever (comma-list + "all" sentinel,
+Covers the backend toggle (env-var driven, default "codex" unchanged), the
+LIVENESS_CODEX_CHAT_IDS rollback lever (comma-list + "all" sentinel,
 mirroring bot.py's OINK_LOCAL_CHAT_IDS), dispatcher routing (including the
 rollback lever overriding an "orchestrated" default for one chat), and
 `_verify_listing_orchestrated`'s core logic: fetch -> classify, the bounded
-verdict parsing. No real network / no real `claude` CLI —
+verdict parsing. No real network / no real `codex` CLI —
 `sources._detail_fetch.fetch_body_text` and
 `wrapped_run_p` are monkeypatched at module level.
 """
@@ -29,7 +29,7 @@ import telegram_client as tc  # noqa: E402
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     monkeypatch.delenv("LIVENESS_BACKEND", raising=False)
-    monkeypatch.delenv("LIVENESS_CLAUDE_CHAT_IDS", raising=False)
+    monkeypatch.delenv("LIVENESS_CODEX_CHAT_IDS", raising=False)
     yield
 
 
@@ -48,13 +48,13 @@ def _envelope(result_obj) -> str:
 # Backend toggle
 # --------------------------------------------------------------------------
 
-def test_backend_defaults_to_claude():
-    assert tc._liveness_backend() == "claude"
+def test_backend_defaults_to_codex():
+    assert tc._liveness_backend() == "codex"
 
 
-def test_backend_invalid_value_falls_back_to_claude(monkeypatch):
+def test_backend_invalid_value_falls_back_to_codex(monkeypatch):
     monkeypatch.setenv("LIVENESS_BACKEND", "bogus")
-    assert tc._liveness_backend() == "claude"
+    assert tc._liveness_backend() == "codex"
 
 
 def test_backend_orchestrated_when_set(monkeypatch):
@@ -63,79 +63,79 @@ def test_backend_orchestrated_when_set(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# LIVENESS_CLAUDE_CHAT_IDS rollback lever
+# LIVENESS_CODEX_CHAT_IDS rollback lever
 # --------------------------------------------------------------------------
 
-def test_claude_chat_ids_unset_forces_nobody():
-    assert tc._parse_liveness_claude_chat_ids_env() == set()
-    assert tc._liveness_claude_all_enabled() is False
-    assert tc._liveness_forced_to_claude(12345) is False
+def test_codex_chat_ids_unset_forces_nobody():
+    assert tc._parse_liveness_codex_chat_ids_env() == set()
+    assert tc._liveness_codex_all_enabled() is False
+    assert tc._liveness_forced_to_codex(12345) is False
 
 
-def test_claude_chat_ids_comma_list(monkeypatch):
-    monkeypatch.setenv("LIVENESS_CLAUDE_CHAT_IDS", "111, 222,333")
-    assert tc._parse_liveness_claude_chat_ids_env() == {111, 222, 333}
-    assert tc._liveness_forced_to_claude(111) is True
-    assert tc._liveness_forced_to_claude(999) is False
+def test_codex_chat_ids_comma_list(monkeypatch):
+    monkeypatch.setenv("LIVENESS_CODEX_CHAT_IDS", "111, 222,333")
+    assert tc._parse_liveness_codex_chat_ids_env() == {111, 222, 333}
+    assert tc._liveness_forced_to_codex(111) is True
+    assert tc._liveness_forced_to_codex(999) is False
 
 
-def test_claude_chat_ids_bad_tokens_dropped(monkeypatch):
-    monkeypatch.setenv("LIVENESS_CLAUDE_CHAT_IDS", "111,not-a-number,222,0")
-    assert tc._parse_liveness_claude_chat_ids_env() == {111, 222}
+def test_codex_chat_ids_bad_tokens_dropped(monkeypatch):
+    monkeypatch.setenv("LIVENESS_CODEX_CHAT_IDS", "111,not-a-number,222,0")
+    assert tc._parse_liveness_codex_chat_ids_env() == {111, 222}
 
 
-def test_claude_chat_ids_all_sentinel(monkeypatch):
-    monkeypatch.setenv("LIVENESS_CLAUDE_CHAT_IDS", "all")
-    assert tc._liveness_claude_all_enabled() is True
-    assert tc._parse_liveness_claude_chat_ids_env() == set()
-    assert tc._liveness_forced_to_claude(1) is True
-    assert tc._liveness_forced_to_claude(None) is True
+def test_codex_chat_ids_all_sentinel(monkeypatch):
+    monkeypatch.setenv("LIVENESS_CODEX_CHAT_IDS", "all")
+    assert tc._liveness_codex_all_enabled() is True
+    assert tc._parse_liveness_codex_chat_ids_env() == set()
+    assert tc._liveness_forced_to_codex(1) is True
+    assert tc._liveness_forced_to_codex(None) is True
 
 
-def test_forced_to_claude_none_chat_id_without_all_is_not_forced():
-    assert tc._liveness_forced_to_claude(None) is False
+def test_forced_to_codex_none_chat_id_without_all_is_not_forced():
+    assert tc._liveness_forced_to_codex(None) is False
 
 
 # --------------------------------------------------------------------------
 # Dispatcher routing
 # --------------------------------------------------------------------------
 
-def test_dispatcher_routes_to_claude_by_default(monkeypatch):
-    calls = {"orchestrated": 0, "claude": 0}
+def test_dispatcher_routes_to_codex_by_default(monkeypatch):
+    calls = {"orchestrated": 0, "codex": 0}
     monkeypatch.setattr(tc, "_verify_listing_orchestrated",
                          lambda *a, **k: calls.__setitem__("orchestrated", calls["orchestrated"] + 1) or (True, "ok"))
-    monkeypatch.setattr(tc, "_web_search_listing_still_open_claude",
-                         lambda *a, **k: calls.__setitem__("claude", calls["claude"] + 1) or (True, "ok"))
+    monkeypatch.setattr(tc, "_web_search_listing_still_open_codex",
+                         lambda *a, **k: calls.__setitem__("codex", calls["codex"] + 1) or (True, "ok"))
     tc._web_search_listing_still_open(_job(), chat_id=1)
-    assert calls == {"orchestrated": 0, "claude": 1}
+    assert calls == {"orchestrated": 0, "codex": 1}
 
 
 def test_dispatcher_routes_to_orchestrated_when_flag_set(monkeypatch):
     monkeypatch.setenv("LIVENESS_BACKEND", "orchestrated")
-    calls = {"orchestrated": 0, "claude": 0}
+    calls = {"orchestrated": 0, "codex": 0}
     monkeypatch.setattr(tc, "_verify_listing_orchestrated",
                          lambda *a, **k: calls.__setitem__("orchestrated", calls["orchestrated"] + 1) or (True, "ok"))
-    monkeypatch.setattr(tc, "_web_search_listing_still_open_claude",
-                         lambda *a, **k: calls.__setitem__("claude", calls["claude"] + 1) or (True, "ok"))
+    monkeypatch.setattr(tc, "_web_search_listing_still_open_codex",
+                         lambda *a, **k: calls.__setitem__("codex", calls["codex"] + 1) or (True, "ok"))
     tc._web_search_listing_still_open(_job(), chat_id=1)
-    assert calls == {"orchestrated": 1, "claude": 0}
+    assert calls == {"orchestrated": 1, "codex": 0}
 
 
 def test_dispatcher_rollback_lever_overrides_orchestrated_default(monkeypatch):
-    """Fleet-wide orchestrated, but this one chat is pinned back to claude."""
+    """Fleet-wide orchestrated, but this one chat is pinned back to codex."""
     monkeypatch.setenv("LIVENESS_BACKEND", "orchestrated")
-    monkeypatch.setenv("LIVENESS_CLAUDE_CHAT_IDS", "42")
-    calls = {"orchestrated": 0, "claude": 0}
+    monkeypatch.setenv("LIVENESS_CODEX_CHAT_IDS", "42")
+    calls = {"orchestrated": 0, "codex": 0}
     monkeypatch.setattr(tc, "_verify_listing_orchestrated",
                          lambda *a, **k: calls.__setitem__("orchestrated", calls["orchestrated"] + 1) or (True, "ok"))
-    monkeypatch.setattr(tc, "_web_search_listing_still_open_claude",
-                         lambda *a, **k: calls.__setitem__("claude", calls["claude"] + 1) or (True, "ok"))
+    monkeypatch.setattr(tc, "_web_search_listing_still_open_codex",
+                         lambda *a, **k: calls.__setitem__("codex", calls["codex"] + 1) or (True, "ok"))
 
     tc._web_search_listing_still_open(_job(), chat_id=42)
-    assert calls == {"orchestrated": 0, "claude": 1}, "chat 42 is on the rollback list"
+    assert calls == {"orchestrated": 0, "codex": 1}, "chat 42 is on the rollback list"
 
     tc._web_search_listing_still_open(_job(), chat_id=7)
-    assert calls == {"orchestrated": 1, "claude": 1}, "chat 7 is NOT on the rollback list"
+    assert calls == {"orchestrated": 1, "codex": 1}, "chat 7 is NOT on the rollback list"
 
 
 # --------------------------------------------------------------------------
@@ -151,7 +151,7 @@ def test_orchestrated_no_url_returns_unknown():
 def test_orchestrated_happy_path_open(monkeypatch):
     monkeypatch.setattr("sources._detail_fetch.fetch_body_text",
                          lambda url, **k: "Apply now for this Frontend Engineer role at Acme.")
-    # NOTE: `_verify_listing_orchestrated`/`_web_search_listing_still_open_claude`
+    # NOTE: `_verify_listing_orchestrated`/`_web_search_listing_still_open_codex`
     # both do a LOCAL `from instrumentation.wrappers import wrapped_run_p[...]`
     # inside the function body (matching this file's established defensive
     # lazy-import style throughout) — patch the SOURCE module's attribute,
@@ -213,7 +213,7 @@ def test_orchestrated_none_stdout_returns_unknown(monkeypatch):
     assert reason == "unknown:cli_unavailable"
 
 
-def test_orchestrated_and_claude_share_the_same_verdict_rules_text(monkeypatch):
+def test_orchestrated_and_codex_share_the_same_verdict_rules_text(monkeypatch):
     """The single-source-of-truth guarantee: both backends' actual
     constructed prompts must embed the exact same classification rules
     block — captured via their real code paths, not re-derived."""
@@ -226,8 +226,8 @@ def test_orchestrated_and_claude_share_the_same_verdict_rules_text(monkeypatch):
     tc._verify_listing_orchestrated(job)
 
     monkeypatch.setattr("instrumentation.wrappers.wrapped_run_p_with_tools", lambda store, caller, prompt, **k:
-                         captured.__setitem__("claude", prompt) or _envelope({"status": "unknown", "reason": ""}))
-    tc._web_search_listing_still_open_claude(job)
+                         captured.__setitem__("codex", prompt) or _envelope({"status": "unknown", "reason": ""}))
+    tc._web_search_listing_still_open_codex(job)
 
     assert tc._LIVENESS_VERDICT_RULES in captured["orchestrated"]
-    assert tc._LIVENESS_VERDICT_RULES in captured["claude"]
+    assert tc._LIVENESS_VERDICT_RULES in captured["codex"]

@@ -32,7 +32,7 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
-# feedback_digest is lightweight (claude_cli + instrumentation.wrappers +
+# feedback_digest is lightweight (codex_cli + instrumentation.wrappers +
 # forensic — none of which import the source adapters or search_jobs
 # itself), so unlike `search_jobs.run` below it is safe to import eagerly
 # at module scope without dragging the whole pipeline into every test that

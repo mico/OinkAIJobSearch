@@ -120,6 +120,30 @@ def test_cache_miss_writes_then_hit_reads(tmp_db, fake_scorer):
         assert out2[j.external_id]["why_match"] == out1[j.external_id]["why_match"]
 
 
+def test_model_change_rescores_and_keeps_separate_cache(tmp_db, monkeypatch):
+    monkeypatch.delenv("OINK_CODEX_MODEL", raising=False)
+    job = _make_job("linkedin", "model-switch")
+    old_hash = job_enrich.scoring_profile_hash("resume body text", "prefs")
+    assert old_hash == db_module.profile_hash("resume body text", "prefs", scorer="codex:default")
+    tmp_db.upsert_scores(42, old_hash, {job.job_id: {"match_score": 1}}, "codex")
+
+    monkeypatch.setenv("OINK_CODEX_MODEL", "configured-model")
+    assert job_enrich.scoring_profile_hash("resume body text", "prefs") != old_hash
+    calls = []
+
+    def fake_run(store, caller, prompt, **kwargs):
+        calls.append((caller, prompt, kwargs))
+        assert "resume body text" in prompt
+        return '{"result":"{\\"results\\":[{\\"id\\":\\"j1\\",\\"match_score\\":5}]}"}'
+
+    monkeypatch.setattr(job_enrich, "wrapped_run_p", fake_run)
+    assert _run([job], tmp_db, chat_id=42)[job.external_id]["match_score"] == 5
+    assert _run([job], tmp_db, chat_id=42)[job.external_id]["match_score"] == 5
+    assert len(calls) == 1
+    monkeypatch.delenv("OINK_CODEX_MODEL")
+    assert _run([job], tmp_db, chat_id=42)[job.external_id]["match_score"] == 1
+
+
 def test_profile_hash_change_invalidates(tmp_db, fake_scorer):
     jobs = [_make_job("indeed", "j1")]
 
@@ -140,18 +164,18 @@ def test_partial_cache_hit(tmp_db, fake_scorer):
     jobs = [_make_job("wellfound", f"j{n}") for n in range(3)]
 
     # Pre-warm the cache with the first 2 jobs only by upserting directly.
-    phash = db_module.profile_hash("resume body text", "prefs")
+    phash = job_enrich.scoring_profile_hash("resume body text", "prefs")
     seed = {
         jobs[0].job_id: {
             "match_score": 4, "why_match": "seed", "why_mismatch": "",
-            "key_details": {}, "model": "sonnet",
+            "key_details": {}, "model": "rescore",
         },
         jobs[1].job_id: {
             "match_score": 2, "why_match": "seed", "why_mismatch": "",
-            "key_details": {}, "model": "sonnet",
+            "key_details": {}, "model": "rescore",
         },
     }
-    written = tmp_db.upsert_scores(99, phash, seed, model="sonnet")
+    written = tmp_db.upsert_scores(99, phash, seed, model="rescore")
     assert written == 2
 
     out = _run(jobs, tmp_db, chat_id=99)
@@ -202,7 +226,7 @@ def test_purge_user(tmp_db, fake_scorer):
     assert removed == 1
 
     # chat 20's row must survive.
-    phash = db_module.profile_hash("resume body text", "prefs")
+    phash = job_enrich.scoring_profile_hash("resume body text", "prefs")
     survived = tmp_db.get_cached_scores(20, [job_b.job_id], phash)
     assert job_b.job_id in survived
     cleared = tmp_db.get_cached_scores(10, [job_a.job_id], phash)
@@ -247,7 +271,7 @@ def test_no_cache_when_kwargs_absent(tmp_db, fake_scorer):
     assert len(fake_scorer) == 2
 
     # Nothing should have landed in the cache.
-    phash = db_module.profile_hash("r", "p")
+    phash = job_enrich.scoring_profile_hash("r", "p")
     assert tmp_db.get_cached_scores(1, [job.job_id], phash) == {}
 
 
@@ -258,7 +282,7 @@ def test_ttl_purge(tmp_db):
         1, phash,
         {"job_old": {"match_score": 3, "why_match": "", "why_mismatch": "",
                      "key_details": {}}},
-        model="haiku",
+        model="primary",
     )
 
     # Backdate the row to 10 days ago.
@@ -274,7 +298,7 @@ def test_ttl_purge(tmp_db):
         1, phash,
         {"job_new": {"match_score": 5, "why_match": "", "why_mismatch": "",
                      "key_details": {}}},
-        model="haiku",
+        model="primary",
     )
 
     removed = tmp_db.purge_job_scores_older_than(7 * 86400)
@@ -283,3 +307,66 @@ def test_ttl_purge(tmp_db):
     survivors = tmp_db.get_cached_scores(1, ["job_old", "job_new"], phash)
     assert "job_new" in survivors
     assert "job_old" not in survivors
+
+
+@pytest.mark.parametrize("source", ["reddit", "x_twitter"])
+def test_improved_post_content_invalidates_thin_score(tmp_db, monkeypatch, source):
+    """An unchanged profile must reconsider a posting when its body arrives."""
+    from dataclasses import replace
+
+    thin = _make_job(source, "body-arrives")
+    thin.snippet = "Hiring engineer"
+    full = replace(thin, snippet="Hiring engineer\nComplete requirements: Python, remote worldwide.")
+    assert tmp_db.upsert_job(thin.as_db_dict()) is True
+    first_seen = tmp_db.get_job(thin.job_id)["first_seen_at"]
+    phash = job_enrich.scoring_profile_hash("resume body text", "prefs")
+    other = _make_job("linkedin", "unchanged")
+    for chat_id in (42, 99):
+        tmp_db.upsert_scores(chat_id, phash, {
+            thin.job_id: {"match_score": 2, "why_mismatch": "Thin content"},
+            other.job_id: {"match_score": 5, "why_match": "Unrelated cached job"},
+        }, "codex")
+
+    assert tmp_db.upsert_job(thin.as_db_dict()) is False
+    assert _run([thin], tmp_db, 42)[thin.external_id]["match_score"] == 2
+    assert tmp_db.upsert_job(full.as_db_dict()) is False
+    stored = tmp_db.get_job(thin.job_id)
+    assert stored["snippet"] == full.snippet
+    assert stored["first_seen_at"] == first_seen
+    for chat_id in (42, 99):
+        assert tmp_db.get_cached_scores(chat_id, [thin.job_id, other.job_id], phash) == {
+            other.job_id: {
+                "match_score": 5, "why_match": "Unrelated cached job",
+                "why_mismatch": "", "key_details": {}, "model": "codex",
+            },
+        }
+
+    def score(jobs, *args, **kwargs):
+        assert [(job.external_id, job.snippet) for job in jobs] == [(full.external_id, full.snippet)]
+        return {full.external_id: {"match_score": 4, "why_match": "Requirements verified",
+                                   "why_mismatch": "", "key_details": {}}}
+
+    monkeypatch.setattr(job_enrich, "_enrich_pool", score)
+    assert _run([full], tmp_db, 42)[full.external_id]["match_score"] == 4
+    assert tmp_db.upsert_job(full.as_db_dict()) is False
+    monkeypatch.setattr(job_enrich, "_enrich_pool", lambda *a, **k: pytest.fail("unchanged content must use its fresh score"))
+    assert _run([full], tmp_db, 42)[full.external_id]["match_score"] == 4
+
+
+def test_changed_post_content_removes_only_its_queued_verdict(tmp_db):
+    from dataclasses import replace
+
+    job = _make_job("x_twitter", "changed-eligibility")
+    other = _make_job("reddit", "unrelated")
+    for item in (job, other):
+        tmp_db.upsert_job(item.as_db_dict())
+        tmp_db.enqueue_match(42, item.job_id, "profile", 4)
+    original = tmp_db.fetch_queue(42, "profile")
+    assert {item["job_id"] for item in original} == {job.job_id, other.job_id}
+    assert tmp_db.upsert_job(job.as_db_dict()) is False
+    assert tmp_db.fetch_queue(42, "profile") == original
+    changed = replace(job, snippet="Updated description: US residents only.")
+    assert tmp_db.upsert_job(changed.as_db_dict()) is False
+    assert [item for item in tmp_db.fetch_queue(42, "profile")] == [
+        item for item in original if item["job_id"] == other.job_id
+    ]
